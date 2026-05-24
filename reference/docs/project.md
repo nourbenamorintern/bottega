@@ -125,7 +125,7 @@ docs/               You are here.
 ```bash
 corepack enable          # provisions pnpm at the version pinned in package.json
 pnpm install
-pnpm dev                 # frontend on :5173, backend on :3002
+pnpm dev                 # frontend on :5173, backend on :3001
 pnpm test:run            # unit + integration tests (Vitest)
 ```
 

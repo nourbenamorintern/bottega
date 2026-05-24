@@ -39,9 +39,9 @@ export default defineConfig(({ mode }) => {
       port: parseInt(env.VITE_PORT ?? '') || 5173,
       allowedHosts,
       proxy: {
-        '/api': `http://localhost:${env.PORT || 3002}`,
+        '/api': `http://localhost:${env.PORT || 3001}`,
         '/ws': {
-          target: `ws://localhost:${env.PORT || 3002}`,
+          target: `ws://localhost:${env.PORT || 3001}`,
           ws: true,
         },
       },
