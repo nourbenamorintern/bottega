@@ -12,7 +12,9 @@ It supports Claude Code, Codex, and OpenCode so you can mix and match models on 
 
 See the demo:
 
-https://github.com/user-attachments/assets/ca10c517-d511-46b2-80a2-b417a5966875
+<video src="https://github.com/vdaubry/bottega/raw/main/assets/demo.mp4" controls width="100%"></video>
+
+▶️ [Watch the demo](https://github.com/vdaubry/bottega/raw/main/assets/demo.mp4) (if the embedded player doesn't load).
 
 Want to see how we use it in practice? We share our experience after shipping our 1000th user story with this tool on a production codebase (a large Rails monolith) [launch post](https://vdaubry.github.io/bottega-launch/)
 
