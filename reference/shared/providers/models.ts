@@ -1,3 +1,4 @@
+// shared/providers/models.ts
 // Per-provider model + effort lists.
 //
 // These are the canonical sources for what the UI offers and what the
@@ -60,7 +61,24 @@ export type OpenCodeModel = `opencode/${string}`;
 export const OPENCODE_EFFORTS = [] as const;
 export type OpenCodeEffort = never;
 
-export const PROVIDERS = ['anthropic', 'openai', 'opencode'] as const;
+// GitHub Copilot's model catalog is owned by GitHub and changes over time —
+// Bottega does NOT hardcode it. The source of truth is the live
+// GET /api/copilot-auth/models endpoint, surfaced to the settings UI via
+// api.copilotAuth.models(). Storage uses the bare model ID returned by the API
+// (e.g. 'gpt-4o', 'gpt-4o-mini'). Same rationale as OPENCODE_MODELS.
+//
+// Why no enum: GitHub controls which models are available per subscription
+// tier and org settings. Hardcoding would break for any user whose org has
+// a different allowlist. The live API is the only source of truth.
+export const GITHUB_COPILOT_MODELS = [] as const;
+export type GitHubCopilotModel = string; // dynamic — not a literal union
+
+// GitHub Copilot has no effort dimension — reasoning is baked into each model.
+// UI hides the effort dropdown when the array is empty.
+export const GITHUB_COPILOT_EFFORTS = [] as const;
+export type GitHubCopilotEffort = never;
+
+export const PROVIDERS = ['anthropic', 'openai', 'opencode', 'github-copilot'] as const;
 
 /**
  * Return the model list for a provider. Used by the settings UI and
@@ -70,12 +88,14 @@ export const PROVIDERS = ['anthropic', 'openai', 'opencode'] as const;
 export function modelsForProvider(provider: Provider): readonly string[] {
   if (provider === 'anthropic') return ANTHROPIC_MODELS;
   if (provider === 'openai') return OPENAI_MODELS;
+  if (provider === 'github-copilot') return GITHUB_COPILOT_MODELS;
   return OPENCODE_MODELS;
 }
 
 export function effortsForProvider(provider: Provider): readonly string[] {
   if (provider === 'anthropic') return ANTHROPIC_EFFORTS;
   if (provider === 'openai') return OPENAI_EFFORTS;
+  if (provider === 'github-copilot') return GITHUB_COPILOT_EFFORTS;
   return OPENCODE_EFFORTS;
 }
 
@@ -104,11 +124,30 @@ export function isOpenAIEffort(value: unknown): value is OpenAIEffort {
 // validation happens at the SDK boundary where OpenCode itself returns
 // `Model not found: ...` for an unknown ID.
 export function isOpenCodeModel(value: unknown): value is OpenCodeModel {
-  return typeof value === 'string' && value.startsWith('opencode/') && value.length > 'opencode/'.length;
+  return (
+    typeof value === 'string' &&
+    value.startsWith('opencode/') &&
+    value.length > 'opencode/'.length
+  );
 }
 
 export function isOpenCodeEffort(value: unknown): value is OpenCodeEffort {
   // OpenCode has no efforts — nothing satisfies this guard.
+  void value;
+  return false;
+}
+
+export function isGitHubCopilotModel(value: unknown): value is GitHubCopilotModel {
+  // Dynamic catalog — GitHub controls the valid model IDs per subscription
+  // tier and org policy. Accept any non-empty string here; the Copilot API
+  // itself returns an HTTP error for unknown IDs at runtime.
+  // DO NOT check against GITHUB_COPILOT_MODELS (empty array) — that would
+  // reject every model and make GitHub Copilot permanently unusable.
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+export function isGitHubCopilotEffort(value: unknown): value is GitHubCopilotEffort {
+  // GitHub Copilot has no effort dimension — nothing satisfies this guard.
   void value;
   return false;
 }
@@ -119,11 +158,11 @@ export function isModelForProvider(
   model: unknown,
 ): model is string {
   if (typeof model !== 'string') return false;
-  // OpenCode is the special case: the Zen catalog is owned upstream
-  // and fetched live, so we only enforce the `opencode/<id>` prefix
-  // shape. Anthropic and OpenAI use a static enum so we still gate
-  // against the canonical list.
+  // OpenCode: dynamic Zen catalog, only enforce prefix shape.
   if (provider === 'opencode') return isOpenCodeModel(model);
+  // GitHub Copilot: dynamic catalog, accept any non-empty string
+  // (API validates at runtime).
+  if (provider === 'github-copilot') return isGitHubCopilotModel(model);
   return modelsForProvider(provider).includes(model);
 }
 

@@ -1,3 +1,4 @@
+// server/services/conversation/startConversation.ts
 // Public conversation orchestrators: `startConversation` (new task conversation)
 // and `sendMessage` (resume an existing conversation). Both share the unified
 // streaming loop in `runStreamingLoop.ts` and compose lifecycle hooks via
@@ -35,6 +36,10 @@ import {
   startOpenCodeConversation,
   sendOpenCodeMessage,
 } from './startOpenCodeConversation.js';
+import {
+  startCopilotConversation,
+  sendCopilotMessage,
+} from './startCopilotConversation.js';
 import type { ConversationOptions, StreamingContext } from './types.js';
 
 /**
@@ -70,6 +75,9 @@ export async function startConversation(
   }
   if (options.provider === 'opencode') {
     return startOpenCodeConversation(taskId, message, options);
+  }
+  if (options.provider === 'github-copilot') {
+    return startCopilotConversation(taskId, message, options);
   }
 
   const normalizedOptions = validateAndNormalizeOptions(options, 'startConversation');
@@ -108,8 +116,8 @@ export async function startConversation(
   let conversationId = options.conversationId;
   if (!conversationId) {
     // This is the Anthropic branch (the dispatch at the top routed
-    // openai/opencode away), so the row is stamped 'anthropic' with the
-    // explicit model+effort the turn will run on.
+    // openai/opencode/github-copilot away), so the row is stamped 'anthropic'
+    // with the explicit model+effort the turn will run on.
     const conversation = conversationsDb.create(taskId, 'anthropic', model, effort);
     conversationId = conversation.id;
     console.log(
@@ -392,6 +400,9 @@ export async function sendMessage(
   }
   if (resolvedProvider === 'opencode') {
     return sendOpenCodeMessage(conversationId, message, options);
+  }
+  if (resolvedProvider === 'github-copilot') {
+    return sendCopilotMessage(conversationId, message, options);
   }
 
   const normalizedOptions = validateAndNormalizeOptions(options, 'sendMessage');

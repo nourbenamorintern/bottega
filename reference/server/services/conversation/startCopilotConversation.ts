@@ -1,35 +1,8 @@
-// OpenCode-flavoured `startConversation` — the third-provider branch
-// of the orchestrator.
-// bottega\reference\server\services\conversation\startOpenCodeConversation.ts
-// Structure mirrors `startCodexConversation.ts` (Codex). The Anthropic
-// path stays the historical default; `startConversation` forks at the
-// top when `options.provider === 'opencode'` and delegates here.
+// server/services/conversation/startCopilotConversation.ts
 //
-// What this branch DOES:
-//   - Resolves cwd + worktree path the same way as the Claude/Codex paths.
-//   - Loads per-user OpenCode credentials (Zen API key via the
-//     `opencode` credential store) and rejects up-front when missing.
-//   - Calls `OpenCodeProvider.startTurn(...)` / `sendTurnMessage(...)`
-//     and consumes the `AsyncIterable<UnifiedMessage>` it returns.
-//   - Stamps `claude_conversation_id` + `provider_session_id` on the
-//     conversation row once the OpenCode session id is known
-//     (resolved synchronously by `session.create`, so the synthetic
-//     user message already carries it).
-//   - Broadcasts `ai-response` (and a back-compat `claude-response`)
-//     for every UnifiedMessage so the frontend renders OpenCode turns
-//     through the same path as Claude/Codex.
-//   - Drives `activeSessions`, the streaming lifecycle, and the
-//     agent-run completion handler.
-//
-// What this branch does NOT do (capability flags from D8 + R1):
-//   - No AskUserQuestion / canUseTool (OpenCode has no canUseTool).
-//   - No MCP wait (OpenCode's MCP isn't wired through Bottega in v1).
-//   - No image attachments (v1).
-//   - No thinking-delta accumulator (ReasoningPart is emitted whole).
-//   - No live `getContextUsage()` breakdown.
-//   - Review agents are allowed (R1) but `videoConfig` is dropped for
-//     them — Playwright capture isn't wired through OpenCode's worktree
-//     reflection.
+// GitHub Copilot-flavoured startConversation — the fourth-provider branch.
+// Structure mirrors startOpenCodeConversation.ts exactly.
+// startConversation() forks at the top when options.provider === 'github-copilot'.
 
 import { promises as fs } from 'fs';
 import { agentRunsDb, conversationsDb, tasksDb } from '../../database/db.js';
@@ -38,8 +11,7 @@ import { getWorktreeProjectPath, worktreeExists } from '../worktree.js';
 import { generateConversationTitle } from '../titleGenerator.js';
 import { createContextUsageTracker } from '../contextUsageTracker.js';
 import { getCredentialStore } from '../credentials/registry.js';
-import { openCodeProvider } from '../providers/opencode/index.js';
-import { mirrorOpenCodeEvent } from '../providers/opencode/messageMirror.js';
+import { copilotProvider } from '../providers/copilot/index.js';
 import { activeSessions } from './sessionState.js';
 import { validateAndNormalizeOptions } from './sdkOptions.js';
 import { handleImages, cleanupTempFiles, handleVideoRecording } from './media.js';
@@ -75,10 +47,10 @@ function unifiedToWireMessage(unified: UnifiedMessage): Record<string, unknown> 
         type: 'assistant',
         uuid: unified.id,
         session_id: unified.providerSessionId,
-        parent_tool_use_id: unified.isSubAgent ? '__opencode_subagent__' : null,
+        parent_tool_use_id: unified.isSubAgent ? '__copilot_subagent__' : null,
         message: {
           id: unified.id,
-          model: unified.model ? `opencode/${unified.model.replace(/^opencode\//, '')}` : null,
+          model: unified.model ?? null,
           ...(unified.usage ? { usage: unified.usage } : {}),
           content: [{ type: 'text', text: unified.text }],
         },
@@ -143,7 +115,7 @@ function unifiedToWireMessage(unified: UnifiedMessage): Record<string, unknown> 
         type: 'system',
         uuid: unified.id,
         session_id: unified.providerSessionId,
-        subtype: unified.subtype ?? 'opencode',
+        subtype: unified.subtype ?? 'github-copilot',
       };
     case 'stream_delta':
       return null;
@@ -161,7 +133,7 @@ function broadcastUnified(
   broadcastFn(conversationId, {
     type: 'ai-response',
     data: wire as never,
-    provider: 'opencode',
+    provider: 'github-copilot',
   });
   broadcastFn(conversationId, {
     type: 'claude-response',
@@ -169,17 +141,6 @@ function broadcastUnified(
   });
 }
 
-/**
- * Pre-mark a still-running agent run as 'failed' the instant we see a
- * `result` event with `isError: true`. Without this the streaming loop
- * ends normally (no thrown exception — OpenCode reports model errors as
- * SSE events, not HTTP errors), composeOnComplete sees status='running'
- * → marks 'completed' → auto-chains → next agent fails the same way →
- * runaway loop until MAX_WORKFLOW_RUNS=25 trips. Setting the status
- * here makes composeOnComplete's "status === 'failed' → no-op" branch
- * fire instead. Safe to call when there is no taskId or no linked
- * agent run (no-op).
- */
 function failLinkedAgentRunIfRunning(
   taskId: number | undefined,
   conversationId: number,
@@ -192,25 +153,16 @@ function failLinkedAgentRunIfRunning(
       agentRunsDb.updateStatus(linked.id, 'failed');
     }
   } catch (err) {
-    // Best-effort: never throw out of an error-handling path.
-    console.warn(
-      '[ConversationAdapter] failed to pre-mark OpenCode agent run as failed:',
-      err,
-    );
+    console.warn('[CopilotAdapter] failed to pre-mark agent run as failed:', err);
   }
 }
 
-/**
- * Resume an existing OpenCode conversation. Mirrors `sendMessage` for
- * the Anthropic path: looks the conversation up, builds the per-user
- * env, and calls `openCodeProvider.sendTurnMessage(resumeSessionId)`.
- */
-export async function sendOpenCodeMessage(
+export async function sendCopilotMessage(
   conversationId: number,
   message: string | null,
   options: ConversationOptions = {},
 ): Promise<void> {
-  const normalizedOptions = validateAndNormalizeOptions(options, 'sendOpenCodeMessage');
+  const normalizedOptions = validateAndNormalizeOptions(options, 'sendCopilotMessage');
   const { broadcastFn, broadcastToTaskSubscribersFn, userId, permissionMode } =
     normalizedOptions;
 
@@ -222,37 +174,38 @@ export async function sendOpenCodeMessage(
     conversation.provider_session_id ?? conversation.claude_conversation_id;
   if (!resumeSessionId) {
     throw new Error(
-      `OpenCode conversation ${conversationId} has no provider_session_id yet`,
+      `Copilot conversation ${conversationId} has no provider_session_id yet`,
     );
   }
 
   const taskId = conversation.task_id;
-  const taskWithProject = taskId ? tasksDb.getWithProject(taskId) : null;
+  if (!taskId) {
+    throw new Error(`Conversation ${conversationId} has no task_id`);
+  }
+  const taskWithProject = tasksDb.getWithProject(taskId);
   if (!taskWithProject) {
     throw new Error(`Task for conversation ${conversationId} not found`);
   }
   const projectId = taskWithProject.project_id;
+  const tid: number = taskId; // narrowed for closure use
 
   let projectPath: string;
   if (conversation.session_path) {
     projectPath = conversation.session_path;
   } else {
     projectPath = taskWithProject.repo_folder_path;
-    if (await worktreeExists(projectPath, taskId!)) { // error in taskId
+    if (await worktreeExists(projectPath, tid)) {
       projectPath = getWorktreeProjectPath(
         projectPath,
-        taskId!,
+        tid,
         taskWithProject.subproject_path,
       );
     }
   }
 
-  const openCodeEnv = getCredentialStore('opencode').buildSdkEnv(userId);
+  const copilotEnv = getCredentialStore('github-copilot').buildSdkEnv(userId);
   const promptText = message ?? '';
 
-  // Resume on an explicit model — re-resolved from the RESUMING user's per-user
-  // agent settings (same provider only), falling back to the stamped row value.
-  // OpenCode has no effort. Explicit options only win for internal callers.
   const userOverride = resolveResumeModelEffort(conversation, userId);
   const model = normalizedOptions.model ?? userOverride.model;
   if (!model) {
@@ -263,20 +216,20 @@ export async function sendOpenCodeMessage(
   }
 
   const abortController = new AbortController();
-  const run = await openCodeProvider.sendTurnMessage({
+  const run = await copilotProvider.sendTurnMessage({
     cwd: projectPath,
     prompt: promptText,
     resumeSessionId,
     model,
     effort: null,
     ...(permissionMode !== undefined ? { permissionMode } : {}),
-    env: openCodeEnv,
+    env: copilotEnv,
     abortController,
   });
 
   const ctx: StreamingContext = {
     conversationId,
-    taskId: taskId ?? undefined,
+    taskId: tid,
     claudeSessionId: resumeSessionId,
     userId,
     broadcastFn,
@@ -285,14 +238,14 @@ export async function sendOpenCodeMessage(
   };
 
   activeSessions.set(resumeSessionId, {
-    instance: run as unknown, // error
+    instance: run as unknown as never,
     abortController,
     startTime: Date.now(),
     status: 'active',
     tempImagePaths: [],
     tempDir: null,
     conversationId,
-    taskId: taskId ?? null,
+    taskId: tid,
     projectId,
     userId: userId ?? null,
   });
@@ -307,19 +260,13 @@ export async function sendOpenCodeMessage(
   try {
     for await (const unified of run.events) {
       broadcastUnified(broadcastFn, conversationId, unified);
-      await mirrorOpenCodeEvent(
-        { projectFolderPath: projectPath, providerSessionId: resumeSessionId },
-        unified,
-      ).catch((err) => {
-        console.warn('[ConversationAdapter] OpenCode resume mirror failed:', err);
-      });
       if (unified.type === 'result') {
         if (unified.isError) {
-          failLinkedAgentRunIfRunning(taskId ?? undefined, conversationId);
+          failLinkedAgentRunIfRunning(tid, conversationId);
         }
         await contextUsageTracker.onResult({
           type: 'result',
-          ...(unified.usage ? { modelUsage: { opencode: unified.usage } } : {}),
+          ...(unified.usage ? { modelUsage: { 'github-copilot': unified.usage } } : {}),
         } as never);
       }
     }
@@ -335,7 +282,7 @@ export async function sendOpenCodeMessage(
     }
     await composeOnComplete(ctx)();
   } catch (error) {
-    console.error('[ConversationAdapter] OpenCode resume error:', error);
+    console.error('[CopilotAdapter] Resume error:', error);
     activeSessions.delete(resumeSessionId);
     if (broadcastFn) {
       const errMsg = error instanceof Error ? error.message : String(error);
@@ -349,12 +296,12 @@ export async function sendOpenCodeMessage(
   }
 }
 
-export async function startOpenCodeConversation(
+export async function startCopilotConversation(
   taskId: number,
   message: string,
   options: ConversationOptions = {},
 ): Promise<{ conversationId: number; claudeSessionId: string }> {
-  const normalizedOptions = validateAndNormalizeOptions(options, 'startOpenCodeConversation');
+  const normalizedOptions = validateAndNormalizeOptions(options, 'startCopilotConversation');
   const {
     broadcastFn,
     broadcastToTaskSubscribersFn,
@@ -365,11 +312,9 @@ export async function startOpenCodeConversation(
     videoConfig,
   } = normalizedOptions;
 
-  // OpenCode turns always run on an explicit `opencode/<id>` model. OpenCode
-  // has no effort dimension (D6), so effort is always null.
   const model = normalizedOptions.model;
   if (!model) {
-    throw new Error('startOpenCodeConversation requires an explicit model');
+    throw new Error('startCopilotConversation requires an explicit model');
   }
 
   const taskWithProject = tasksDb.getWithProject(taskId);
@@ -382,38 +327,38 @@ export async function startOpenCodeConversation(
     projectPath = getWorktreeProjectPath(projectPath, taskId, taskWithProject.subproject_path);
   }
 
-  // Per-user OpenCode env (Zen API key). Throws if the user has no
-  // provisioned auth.json, matching Claude/Codex fail-closed posture.
-  const openCodeEnv = getCredentialStore('opencode').buildSdkEnv(userId);
+  const copilotEnv = getCredentialStore('github-copilot').buildSdkEnv(userId);
 
-  let conversationId = options.conversationId;
-  if (!conversationId) {
-    const conversation = conversationsDb.create(taskId, 'opencode', model, null);
-    conversationId = conversation.id;
+  let _conversationId = options.conversationId;
+  if (!_conversationId) {
+    const conversation = conversationsDb.create(taskId, 'github-copilot', model, null);
+    _conversationId = conversation.id;
     console.log(
-      `[ConversationAdapter] Created OpenCode conversation ${conversationId} for task ${taskId} (model=${model})`,
+      `[ConversationAdapter] Created Copilot conversation ${_conversationId} for task ${taskId} (model=${model})`,
     );
   }
+  // Narrowed to number — TypeScript loses narrowing inside async closures.
+  const cid: number = _conversationId;
 
-  const imageResult = images && images.length > 0
-    ? await handleImages(message, images, projectPath)
-    : { modifiedCommand: message, tempImagePaths: [] as string[], tempDir: null };
-  // OpenCode v1 is text-only — images are silently stripped (the chat
-  // UI disables upload for OpenCode providers in Phase 11).
+  const imageResult =
+    images && images.length > 0
+      ? await handleImages(message, images, projectPath)
+      : { modifiedCommand: message, tempImagePaths: [] as string[], tempDir: null };
   const finalMessageRaw = imageResult.modifiedCommand;
   const finalMessage = await resolveSlashCommand(finalMessageRaw, projectPath);
-  const promptText = (finalMessage ?? message) +
+  const promptText =
+    (finalMessage ?? message) +
     (customSystemPrompt ? `\n\n[System]\n${customSystemPrompt}` : '');
 
   const abortController = new AbortController();
 
-  const run = await openCodeProvider.startTurn({
+  const run = await copilotProvider.startTurn({
     cwd: projectPath,
     prompt: promptText,
     model,
     effort: null,
     ...(permissionMode !== undefined ? { permissionMode } : {}),
-    env: openCodeEnv,
+    env: copilotEnv,
     abortController,
   });
 
@@ -422,11 +367,11 @@ export async function startOpenCodeConversation(
   return new Promise((resolve, reject) => {
     let resolved = false;
     const timeout = setTimeout(() => {
-      if (!resolved) reject(new Error('OpenCode session creation timeout'));
+      if (!resolved) reject(new Error('Copilot session creation timeout'));
     }, 60000);
 
     const ctx: StreamingContext = {
-      conversationId: conversationId!, // error in conversationId
+      conversationId: cid,
       taskId,
       claudeSessionId: null,
       userId,
@@ -437,45 +382,34 @@ export async function startOpenCodeConversation(
     };
 
     const contextUsageTracker = createContextUsageTracker({
-      conversationId: conversationId!, // error in conversationId
+      conversationId: cid,
       broadcastFn,
     });
-
-    // OpenCode resolves the session id synchronously inside startTurn
-    // (session.create returns it before any SSE event lands), so the
-    // first emitted UnifiedMessage already carries `providerSessionId`.
-    // The pre-session buffer is kept as a defensive no-op in case the
-    // provider ever changes that contract.
-    const preSessionBuffer: UnifiedMessage[] = [];
 
     void (async () => {
       try {
         for await (const unified of run.events) {
-          if (
-            !resolved &&
-            unified.providerSessionId &&
-            ctx.claudeSessionId === null
-          ) {
+          if (!resolved && unified.providerSessionId && ctx.claudeSessionId === null) {
             const sid = unified.providerSessionId;
             ctx.claudeSessionId = sid;
-            conversationsDb.updateClaudeId(conversationId!, sid); // error in conversationId
-            conversationsDb.updateProviderSessionId(conversationId!, sid); // error in conversationId
-            conversationsDb.updateSessionPath(conversationId!, projectPath);// error in conversationId
+            conversationsDb.updateClaudeId(cid, sid);
+            conversationsDb.updateProviderSessionId(cid, sid);
+            conversationsDb.updateSessionPath(cid, projectPath);
             activeSessions.set(sid, {
-              instance: run as unknown,// error in run as unknown
+              instance: run as unknown as never,// error
               abortController,
               startTime: Date.now(),
               status: 'active',
               tempImagePaths,
               tempDir,
-              conversationId: conversationId!,// error in conversationId
+              conversationId: cid,
               taskId,
               projectId: taskWithProject.project_id,
               userId: userId ?? null,
             });
 
             generateConversationTitle(
-              conversationId!,// error in conversationId
+              cid,
               message,
               broadcastFn,
               userId,
@@ -486,12 +420,12 @@ export async function startOpenCodeConversation(
             handleStreamingStarted(ctx);
 
             if (broadcastFn) {
-              broadcastFn(conversationId!, {// error in conversationId
+              broadcastFn(cid, {
                 type: 'conversation-created',
-                conversationId: conversationId!,// error in conversationId
+                conversationId: cid,
                 claudeSessionId: sid,
               });
-              broadcastFn(conversationId!, {// error in conversationId
+              broadcastFn(cid, {
                 type: 'session-created',
                 sessionId: sid,
               });
@@ -500,7 +434,7 @@ export async function startOpenCodeConversation(
               broadcastToTaskSubscribersFn(taskId, {
                 type: 'conversation-added',
                 conversation: {
-                  id: conversationId!,// error in conversationId
+                  id: cid,
                   task_id: taskId,
                   claude_conversation_id: sid,
                   created_at: new Date().toISOString(),
@@ -510,45 +444,20 @@ export async function startOpenCodeConversation(
 
             clearTimeout(timeout);
             resolved = true;
-            resolve({ conversationId: conversationId!, claudeSessionId: sid });
-          }// error in conversationId
-
-          broadcastUnified(broadcastFn, conversationId!, unified);
-// error in conversationId
-          if (ctx.claudeSessionId) {
-            if (preSessionBuffer.length > 0) {
-              const sid = ctx.claudeSessionId;
-              for (const buffered of preSessionBuffer) {
-                const patched = { ...buffered, providerSessionId: sid };
-                await mirrorOpenCodeEvent(
-                  { projectFolderPath: projectPath, providerSessionId: sid },
-                  patched,
-                ).catch((err) => {
-                  console.warn('[ConversationAdapter] OpenCode mirror failed (buffered):', err);
-                });
-              }
-              preSessionBuffer.length = 0;
-            }
-            await mirrorOpenCodeEvent(
-              {
-                projectFolderPath: projectPath,
-                providerSessionId: ctx.claudeSessionId,
-              },
-              unified,
-            ).catch((err) => {
-              console.warn('[ConversationAdapter] OpenCode mirror failed:', err);
-            });
-          } else {
-            preSessionBuffer.push(unified);
+            resolve({ conversationId: cid, claudeSessionId: sid });
           }
+
+          broadcastUnified(broadcastFn, cid, unified);
 
           if (unified.type === 'result') {
             if (unified.isError) {
-              failLinkedAgentRunIfRunning(taskId, conversationId!);
+              failLinkedAgentRunIfRunning(taskId, cid);
             }
             await contextUsageTracker.onResult({
               type: 'result',
-              ...(unified.usage ? { modelUsage: { opencode: unified.usage } } : {}),
+              ...(unified.usage
+                ? { modelUsage: { 'github-copilot': unified.usage } }
+                : {}),
             } as never);
           }
         }
@@ -562,7 +471,7 @@ export async function startOpenCodeConversation(
         }
 
         if (broadcastFn) {
-          broadcastFn(conversationId!, {
+          broadcastFn(cid, {
             type: 'claude-complete',
             sessionId: ctx.claudeSessionId,
             exitCode: 0,
@@ -572,7 +481,7 @@ export async function startOpenCodeConversation(
 
         await composeOnComplete(ctx)();
       } catch (error) {
-        console.error('[ConversationAdapter] OpenCode streaming error:', error);
+        console.error('[CopilotAdapter] Streaming error:', error);
         if (ctx.claudeSessionId) {
           activeSessions.delete(ctx.claudeSessionId);
         }
@@ -588,7 +497,7 @@ export async function startOpenCodeConversation(
         }
         if (broadcastFn) {
           const errMsg = error instanceof Error ? error.message : String(error);
-          broadcastFn(conversationId!, {
+          broadcastFn(cid, {
             type: 'claude-error',
             error: errMsg,
           });
@@ -598,4 +507,3 @@ export async function startOpenCodeConversation(
     })();
   });
 }
-// error in conversationId

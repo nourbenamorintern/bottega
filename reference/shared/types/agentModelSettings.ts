@@ -17,6 +17,8 @@ import {
   OPENAI_EFFORTS,
   OPENCODE_MODELS,
   OPENCODE_EFFORTS,
+  GITHUB_COPILOT_MODELS,
+  GITHUB_COPILOT_EFFORTS,
   isModelForProvider,
   isEffortForProvider,
 } from '../providers/models.js';
@@ -72,6 +74,7 @@ export const DEFAULT_AGENT_MODEL_SETTINGS: AgentModelSettings = {
 //     guessed id fails at the SDK boundary).
 const ANTHROPIC_SEED: { model: string; effort: string } = { model: 'sonnet', effort: 'high' };
 const OPENAI_SEED: { model: string; effort: string } = { model: 'gpt-5.5', effort: 'high' };
+const GITHUB_COPILOT_SEED: { model: string; effort: null } = { model: 'gpt-4o', effort: null };
 
 /**
  * The default (provider, model, effort) for a freshly-connected provider.
@@ -87,6 +90,9 @@ export function defaultSettingForProvider(
   }
   if (provider === 'openai') {
     return { provider, model: OPENAI_SEED.model, effort: OPENAI_SEED.effort };
+  }
+  if (provider === 'github-copilot') {
+    return { provider, model: GITHUB_COPILOT_SEED.model, effort: GITHUB_COPILOT_SEED.effort };
   }
   // opencode: no static catalog — a live id is required to seed.
   if (!firstOpenCodeModelId) return null;
@@ -133,9 +139,15 @@ export function isValidAgentModelSetting(
   if (
     setting.provider !== 'anthropic' &&
     setting.provider !== 'openai' &&
-    setting.provider !== 'opencode'
+    setting.provider !== 'opencode' &&
+    setting.provider !== 'github-copilot'
   ) {
     return false;
+  }
+  // Dynamic catalogs: opencode and github-copilot models are validated at
+  // runtime by their respective APIs, not at save time. Accept any non-empty string.
+  if (setting.provider === 'opencode' || setting.provider === 'github-copilot') {
+    return typeof setting.model === 'string' && setting.model.length > 0;
   }
   if (!isModelForProvider(setting.provider, setting.model)) return false;
   if (setting.effort !== null && !isEffortForProvider(setting.provider, setting.effort)) {
@@ -149,10 +161,12 @@ export const MODELS_FOR_UI = {
   anthropic: ANTHROPIC_MODELS,
   openai: OPENAI_MODELS,
   opencode: OPENCODE_MODELS,
+  'github-copilot': GITHUB_COPILOT_MODELS,
 } as const;
 
 export const EFFORTS_FOR_UI = {
   anthropic: ANTHROPIC_EFFORTS,
   openai: OPENAI_EFFORTS,
   opencode: OPENCODE_EFFORTS,
+  'github-copilot': GITHUB_COPILOT_EFFORTS,
 } as const;

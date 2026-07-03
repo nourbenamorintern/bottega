@@ -98,7 +98,7 @@ function validateTokenFileSecurity(
     );
   }
 
-  if ((stats.mode & 0o077) !== 0) {
+  if (process.platform !== 'win32' && (stats.mode & 0o077) !== 0) {
     throw new ClaudeCredentialsError(
       `Claude OAuth token for user ${userId} must not be accessible by group or other users; run chmod 600 ${tokenPath}`,
     );
@@ -189,7 +189,7 @@ function validateClaudeConfigDirSecurity(
     );
   }
 
-  if ((dirStats.mode & 0o077) !== 0) {
+  if (process.platform !== 'win32' && (dirStats.mode & 0o077) !== 0) {
     throw new ClaudeCredentialsError(
       `Claude config directory for user ${userId} must not be accessible by group or other users; run chmod 700 ${claudeConfigDir}`,
     );

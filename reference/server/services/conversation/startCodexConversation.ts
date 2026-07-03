@@ -1,33 +1,10 @@
+// server/services/conversation/startCodexConversation.ts
 // Codex-flavoured `startConversation` — the second-provider branch of
 // the orchestrator.
 //
 // `startConversation` (in `startConversation.ts`) forks at the top: when
 // the conversation's provider is `'openai'`, it delegates here. The
 // existing Claude path stays bit-identical for Anthropic conversations.
-//
-// What this branch DOES:
-//   - Resolves cwd + worktree path the same way as the Claude path.
-//   - Loads per-user Codex credentials (CODEX_HOME) and rejects up-front
-//     when missing (matches Claude's `buildClaudeSdkEnv` fail-closed).
-//   - Calls `CodexProvider.startTurn(...)` and consumes the
-//     `AsyncIterable<UnifiedMessage>` it returns.
-//   - Stamps `claude_conversation_id` + `provider_session_id` on the
-//     conversation row once `thread.started` fires.
-//   - Broadcasts `ai-response` (and a back-compat `claude-response`) for
-//     every UnifiedMessage so the frontend renders Codex turns through
-//     the same path as Claude.
-//   - Drives `activeSessions`, the streaming lifecycle, and the
-//     agent-run completion handler.
-//
-// What this branch does NOT do (capability flags from Phase 4):
-//   - No AskUserQuestion / canUseTool (Codex SDK has no canUseTool).
-//   - No MCP wait (Codex v1 doesn't speak Bottega MCP configs).
-//   - No image attachments (Codex v1).
-//   - No thinking-delta accumulator (no `stream_event` deltas).
-//   - No live `getContextUsage()` breakdown (no per-tool breakdown).
-//
-// The 401-recycle retry path is also unused; Codex SDK auto-refreshes
-// `auth.json` on its own, so we surface SDK errors verbatim.
 
 import { promises as fs } from 'fs';
 import { conversationsDb, tasksDb } from '../../database/db.js';
@@ -59,16 +36,6 @@ function composeOnComplete(ctx: StreamingContext): () => Promise<void> {
   );
 }
 
-/**
- * Translate a UnifiedMessage into the Claude-shaped wire payload the
- * frontend has historically consumed via the `claude-response` WS event.
- *
- * For each UnifiedMessage type, we synthesise the minimal subset of the
- * Claude SDKMessage shape that `MessageComponent` and the SQLite
- * transcript reader both look at. Anything not synthesised stays
- * accessible via `raw` on the unified message; the `ai-response`
- * variant carries the same payload alongside the provider tag.
- */
 function unifiedToWireMessage(unified: UnifiedMessage): Record<string, unknown> | null {
   switch (unified.type) {
     case 'user':
@@ -147,7 +114,6 @@ function unifiedToWireMessage(unified: UnifiedMessage): Record<string, unknown> 
         ...(unified.errors ? { errors: unified.errors } : {}),
       };
     case 'system':
-      // thread.started / turn.started — surface so consumers can ignore.
       return {
         type: 'system',
         uuid: unified.id,
@@ -155,7 +121,7 @@ function unifiedToWireMessage(unified: UnifiedMessage): Record<string, unknown> 
         subtype: unified.subtype ?? 'codex',
       };
     case 'stream_delta':
-      return null; // Codex doesn't emit these; defensive.
+      return null;
   }
 }
 
@@ -172,24 +138,12 @@ function broadcastUnified(
     data: wire as never,
     provider: 'openai',
   });
-  // Back-compat dual-emit for the one-release window — same as the
-  // Anthropic path in runStreamingLoop.
   broadcastFn(conversationId, {
     type: 'claude-response',
     data: wire as never,
   });
 }
 
-/**
- * Resume an existing Codex conversation. Mirrors `sendMessage` for
- * the Anthropic path: looks the conversation up, builds the CODEX_HOME
- * env, and calls `codexProvider.sendTurnMessage(resumeSessionId)`.
- *
- * Codex SDK resumes via `codex.resumeThread(threadId).runStreamed(...)`;
- * we pass the conversation's `provider_session_id` (falls back to
- * `claude_conversation_id` since they're populated identically by
- * `startCodexConversation`).
- */
 export async function sendCodexMessage(
   conversationId: number,
   message: string | null,
@@ -212,21 +166,25 @@ export async function sendCodexMessage(
   }
 
   const taskId = conversation.task_id;
-  const taskWithProject = taskId ? tasksDb.getWithProject(taskId) : null;
+  if (!taskId) {
+    throw new Error(`Conversation ${conversationId} has no task_id`);
+  }
+  const taskWithProject = tasksDb.getWithProject(taskId);
   if (!taskWithProject) {
     throw new Error(`Task for conversation ${conversationId} not found`);
   }
   const projectId = taskWithProject.project_id;
+  const tid: number = taskId; // narrowed for closure use
 
   let projectPath: string;
   if (conversation.session_path) {
     projectPath = conversation.session_path;
   } else {
     projectPath = taskWithProject.repo_folder_path;
-    if (await worktreeExists(projectPath, taskId!)) {
+    if (await worktreeExists(projectPath, tid)) {
       projectPath = getWorktreeProjectPath(
         projectPath,
-        taskId!,
+        tid,
         taskWithProject.subproject_path,
       );
     }
@@ -235,9 +193,6 @@ export async function sendCodexMessage(
   const codexEnv = getCredentialStore('openai').buildSdkEnv(userId);
   const promptText = message ?? '';
 
-  // Resume on an explicit model+effort — re-resolved from the RESUMING user's
-  // per-user agent settings (same provider only), falling back to the stamped
-  // row value. Explicit options only win for internal callers.
   const userOverride = resolveResumeModelEffort(conversation, userId);
   const model = normalizedOptions.model ?? userOverride.model;
   const effort = normalizedOptions.effort ?? userOverride.effort;
@@ -262,7 +217,7 @@ export async function sendCodexMessage(
 
   const ctx: StreamingContext = {
     conversationId,
-    taskId: taskId ?? undefined,
+    taskId: tid,
     claudeSessionId: resumeSessionId,
     userId,
     broadcastFn,
@@ -271,14 +226,14 @@ export async function sendCodexMessage(
   };
 
   activeSessions.set(resumeSessionId, {
-    instance: run as unknown,
+    instance: run as unknown as never,
     abortController,
     startTime: Date.now(),
     status: 'active',
     tempImagePaths: [],
     tempDir: null,
     conversationId,
-    taskId: taskId ?? null,
+    taskId: tid,
     projectId,
     userId: userId ?? null,
   });
@@ -348,7 +303,6 @@ export async function startCodexConversation(
     videoConfig,
   } = normalizedOptions;
 
-  // Codex turns always run on an explicit model+effort (no SDK default).
   const model = normalizedOptions.model;
   const effort = normalizedOptions.effort ?? null;
   if (!model) {
@@ -365,28 +319,27 @@ export async function startCodexConversation(
     projectPath = getWorktreeProjectPath(projectPath, taskId, taskWithProject.subproject_path);
   }
 
-  // Per-user CODEX_HOME. Throws if the user has no provisioned auth.json,
-  // matching the Claude path's fail-closed posture.
   const codexEnv = getCredentialStore('openai').buildSdkEnv(userId);
 
-  let conversationId = options.conversationId;
-  if (!conversationId) {
+  let _conversationId = options.conversationId;
+  if (!_conversationId) {
     const conversation = conversationsDb.create(taskId, 'openai', model, effort);
-    conversationId = conversation.id;
+    _conversationId = conversation.id;
     console.log(
-      `[ConversationAdapter] Created Codex conversation ${conversationId} for task ${taskId} (model=${model})`,
+      `[ConversationAdapter] Created Codex conversation ${_conversationId} for task ${taskId} (model=${model})`,
     );
   }
+  // Narrowed to number — TypeScript loses narrowing inside async closures.
+  const cid: number = _conversationId;
 
-  const imageResult = images && images.length > 0
-    ? await handleImages(message, images, projectPath)
-    : { modifiedCommand: message, tempImagePaths: [] as string[], tempDir: null };
-  // Codex SDK accepts plain-text input only in v1 (capability flag).
-  // If the user attached images they'll be stripped here — the chat UI
-  // disables image upload for Codex providers (Phase 11 capability gate).
+  const imageResult =
+    images && images.length > 0
+      ? await handleImages(message, images, projectPath)
+      : { modifiedCommand: message, tempImagePaths: [] as string[], tempDir: null };
   const finalMessageRaw = imageResult.modifiedCommand;
   const finalMessage = await resolveSlashCommand(finalMessageRaw, projectPath);
-  const promptText = (finalMessage ?? message) +
+  const promptText =
+    (finalMessage ?? message) +
     (customSystemPrompt ? `\n\n[System]\n${customSystemPrompt}` : '');
 
   const abortController = new AbortController();
@@ -410,7 +363,7 @@ export async function startCodexConversation(
     }, 60000);
 
     const ctx: StreamingContext = {
-      conversationId: conversationId!,
+      conversationId: cid,
       taskId,
       claudeSessionId: null,
       userId,
@@ -420,49 +373,37 @@ export async function startCodexConversation(
       videoConfig,
     };
 
-    // Token usage from `turn.completed` flows through the existing
-    // baseline path. The breakdown capability is off for Codex so
-    // `onAssistant` is never called.
     const contextUsageTracker = createContextUsageTracker({
-      conversationId: conversationId!,
+      conversationId: cid,
       broadcastFn,
     });
 
-    // Buffer events that arrive before providerSessionId resolves
-    // (the synthetic user message arrives first, before thread.started).
-    // Once the id lands we patch and mirror them in order.
     const preSessionBuffer: UnifiedMessage[] = [];
 
     void (async () => {
       try {
         for await (const unified of run.events) {
-          // First time we see a provider session id, stamp the row +
-          // fire the streaming-started lifecycle.
-          if (
-            !resolved &&
-            unified.providerSessionId &&
-            ctx.claudeSessionId === null
-          ) {
+          if (!resolved && unified.providerSessionId && ctx.claudeSessionId === null) {
             const sid = unified.providerSessionId;
             ctx.claudeSessionId = sid;
-            conversationsDb.updateClaudeId(conversationId!, sid);
-            conversationsDb.updateProviderSessionId(conversationId!, sid);
-            conversationsDb.updateSessionPath(conversationId!, projectPath);
+            conversationsDb.updateClaudeId(cid, sid);
+            conversationsDb.updateProviderSessionId(cid, sid);
+            conversationsDb.updateSessionPath(cid, projectPath);
             activeSessions.set(sid, {
-              instance: run as unknown,
+              instance: run as unknown as never, // error
               abortController,
               startTime: Date.now(),
               status: 'active',
               tempImagePaths,
               tempDir,
-              conversationId: conversationId!,
+              conversationId: cid,
               taskId,
               projectId: taskWithProject.project_id,
               userId: userId ?? null,
             });
 
             generateConversationTitle(
-              conversationId!,
+              cid,
               message,
               broadcastFn,
               userId,
@@ -473,12 +414,12 @@ export async function startCodexConversation(
             handleStreamingStarted(ctx);
 
             if (broadcastFn) {
-              broadcastFn(conversationId!, {
+              broadcastFn(cid, {
                 type: 'conversation-created',
-                conversationId: conversationId!,
+                conversationId: cid,
                 claudeSessionId: sid,
               });
-              broadcastFn(conversationId!, {
+              broadcastFn(cid, {
                 type: 'session-created',
                 sessionId: sid,
               });
@@ -487,7 +428,7 @@ export async function startCodexConversation(
               broadcastToTaskSubscribersFn(taskId, {
                 type: 'conversation-added',
                 conversation: {
-                  id: conversationId!,
+                  id: cid,
                   task_id: taskId,
                   claude_conversation_id: sid,
                   created_at: new Date().toISOString(),
@@ -497,16 +438,11 @@ export async function startCodexConversation(
 
             clearTimeout(timeout);
             resolved = true;
-            resolve({ conversationId: conversationId!, claudeSessionId: sid });
+            resolve({ conversationId: cid, claudeSessionId: sid });
           }
 
-          broadcastUnified(broadcastFn, conversationId!, unified);
+          broadcastUnified(broadcastFn, cid, unified);
 
-          // Mirror to the messages table so the conversation reloads
-          // with full history. The synthetic user message arrives
-          // before thread.started so it's buffered and replayed (with
-          // the now-known providerSessionId patched in) when the sid
-          // first lands.
           if (ctx.claudeSessionId) {
             if (preSessionBuffer.length > 0) {
               const sid = ctx.claudeSessionId;
@@ -542,7 +478,6 @@ export async function startCodexConversation(
           }
         }
 
-        // Stream ended cleanly.
         if (ctx.claudeSessionId) {
           activeSessions.delete(ctx.claudeSessionId);
         }
@@ -552,7 +487,7 @@ export async function startCodexConversation(
         }
 
         if (broadcastFn) {
-          broadcastFn(conversationId!, {
+          broadcastFn(cid, {
             type: 'claude-complete',
             sessionId: ctx.claudeSessionId,
             exitCode: 0,
@@ -578,7 +513,7 @@ export async function startCodexConversation(
         }
         if (broadcastFn) {
           const errMsg = error instanceof Error ? error.message : String(error);
-          broadcastFn(conversationId!, {
+          broadcastFn(cid, {
             type: 'claude-error',
             error: errMsg,
           });

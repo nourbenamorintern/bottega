@@ -17,6 +17,7 @@ import {
 import type { AgentType } from '../../shared/types/db';
 import type { Provider } from '../../shared/providers/types';
 import type { OpenCodeModelEntry } from '../../shared/api/openCodeAuth';
+import type { CopilotModelEntry } from '../../shared/api/copilotAuth';
 
 const AGENT_LABELS: Record<AgentType, string> = {
   planification: 'Planning',
@@ -33,6 +34,8 @@ function AgentModelsTab() {
   const [connected, setConnected] = useState<Provider[]>([]);
   const [openCodeModels, setOpenCodeModels] = useState<OpenCodeModelEntry[] | null>(null);
   const [isLoadingOpenCodeModels, setLoadingOpenCodeModels] = useState(false);
+  const [copilotModels, setCopilotModels] = useState<CopilotModelEntry[] | null>(null);
+  const [isLoadingCopilotModels, setLoadingCopilotModels] = useState(false);
   const [isLoading, setLoading] = useState(true);
   const [isSaving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -55,6 +58,23 @@ function AgentModelsTab() {
     }
   }, []);
 
+  const loadCopilotModels = useCallback(async () => {
+    setLoadingCopilotModels(true);
+    try {
+      const res = await api.copilotAuth.models();
+      if (!res.ok) {
+        setCopilotModels([]);
+        return;
+      }
+      const body = await res.json();
+      setCopilotModels(body.models);
+    } catch {
+      setCopilotModels([]);
+    } finally {
+      setLoadingCopilotModels(false);
+    }
+  }, []);
+
   useEffect(() => {
     void (async () => {
       setLoading(true);
@@ -67,6 +87,7 @@ function AgentModelsTab() {
           const body = await providersRes.json();
           setConnected(body.connected);
           if (body.connected.includes('opencode')) void loadOpenCodeModels();
+          if (body.connected.includes('github-copilot')) void loadCopilotModels();
         }
         if (settingsRes.ok) {
           const body = await settingsRes.json();
@@ -110,6 +131,10 @@ function AgentModelsTab() {
         merged = { ...current, ...patch };
       }
 
+      // Trigger live catalog fetch on first switch to a dynamic provider.
+      if (patch.provider === 'opencode' && openCodeModels === null) void loadOpenCodeModels();
+      if (patch.provider === 'github-copilot' && copilotModels === null) void loadCopilotModels();
+
       const next: AgentModelSettings = { ...settings, [agent]: merged };
       const previous = settings;
       setSettings(next);
@@ -133,7 +158,7 @@ function AgentModelsTab() {
         setSaving(false);
       }
     },
-    [settings, openCodeModels],
+    [settings, openCodeModels, copilotModels, loadOpenCodeModels, loadCopilotModels],
   );
 
   if (isLoading) {
@@ -188,6 +213,8 @@ function AgentModelsTab() {
             connectedProviders={connected}
             openCodeModels={openCodeModels}
             isLoadingOpenCodeModels={isLoadingOpenCodeModels}
+            copilotModels={copilotModels}
+            isLoadingCopilotModels={isLoadingCopilotModels}
             disabled={isSaving}
             onChange={updateAgentSetting}
           />

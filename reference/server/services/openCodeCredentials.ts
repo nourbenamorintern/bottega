@@ -27,14 +27,14 @@ const OPENCODE_DATA_SUBDIR = 'opencode-data';
 const OPENCODE_CONFIG_SUBDIR = 'opencode-config';
 const OPENCODE_STATE_SUBDIR = 'opencode-state';
 const OPENCODE_CACHE_SUBDIR = 'opencode-cache';
-// `Global.Path.data` is `${XDG_DATA_HOME}/opencode`, and auth.json lives
-// directly under that. So the on-disk path is opencode-data/opencode/auth.json.
+
+// `Global.Path.data` is `${XDG_DATA_HOME}/opencode`, and auth.json lives directly under that.
+// So the on-disk path is opencode-data/opencode/auth.json.
 const OPENCODE_APP_SUBDIR = 'opencode';
 const AUTH_FILE_NAME = 'auth.json';
 
-// OpenCode env keys that override per-user state if inherited from the
-// parent process. Stripped from every spawned subprocess env so the
-// per-user XDG_* paths and auth.json are the only sources of truth.
+// OpenCode env keys that override per-user state if inherited from the parent process.
+// Stripped from every spawned subprocess env so the per-user XDG_* paths and auth.json are the only sources of truth.
 const GLOBAL_OPENCODE_ENV_KEYS = [
   'OPENCODE_AUTH_CONTENT',
   'OPENCODE_CONFIG',
@@ -160,17 +160,21 @@ function validateAuthFileSecurity(
     );
   }
 
-  const currentUid = typeof process.getuid === 'function' ? process.getuid() : null;
-  if (currentUid !== null && stats.uid !== currentUid) {
-    throw new OpenCodeCredentialsError(
-      `OpenCode auth.json for user ${userId} must be owned by the current user`,
-    );
-  }
+  // Cross-Platform Isolation Guard: On Windows, fs.statSync() mode bits and UIDs are 
+  // arbitrary placeholders that do not accurately represent active NTFS ACL permission rings.
+  if (process.platform !== 'win32') {
+    const currentUid = typeof process.getuid === 'function' ? process.getuid() : null;
+    if (currentUid !== null && stats.uid !== currentUid) {
+      throw new OpenCodeCredentialsError(
+        `OpenCode auth.json for user ${userId} must be owned by the current user`,
+      );
+    }
 
-  if ((stats.mode & 0o077) !== 0) {
-    throw new OpenCodeCredentialsError(
-      `OpenCode auth.json for user ${userId} must not be accessible by group or other users; run chmod 600 ${authPath}`,
-    );
+    if ((stats.mode & 0o077) !== 0) {
+      throw new OpenCodeCredentialsError(
+        `OpenCode auth.json for user ${userId} must not be accessible by group or other users; run chmod 600 ${authPath}`,
+      );
+    }
   }
 }
 
@@ -185,24 +189,21 @@ export interface OpenCodeAuthJson {
 
 function isOpenCodeAuthJson(value: unknown): value is OpenCodeAuthJson {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  // R15 defence-in-depth: under Zen billing the on-disk shape must be
-  // exactly one record under providerID 'opencode'. Reject files that
-  // carry stale per-sub-provider entries from an earlier draft of the
-  // plan, even if the 'opencode' field is well-formed — the spawned
-  // server would still see those extras and route through the wrong
-  // path.
-  const keys = Object.keys(value as Record<string, unknown>);
+  
+  // Cast to Record with 'any' indexer to dodge implicit strict index-signature compatibility issues
+  const keys = Object.keys(value as Record<string, any>);
   if (keys.length !== 1 || keys[0] !== 'opencode') return false;
+
   const v = (value as { opencode?: unknown }).opencode;
   if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+
   const rec = v as { type?: unknown; key?: unknown };
   return rec.type === 'api' && typeof rec.key === 'string' && rec.key.length > 0;
 }
 
 /**
- * Reads and validates the on-disk auth.json. Throws when missing /
- * malformed / insecure. Returns the parsed structure when the file holds
- * a non-empty Zen API key under providerID 'opencode'.
+ * Reads and validates the on-disk auth.json. Throws when missing / malformed / insecure.
+ * Returns the parsed structure when the file holds a non-empty Zen API key under providerID 'opencode'.
  */
 export function readOpenCodeAuth(
   userId: number | string | undefined,
@@ -227,11 +228,8 @@ export function readOpenCodeAuth(
 }
 
 /**
- * Persist a Zen API key. The on-disk shape is single-record:
- *   { "opencode": { "type": "api", "key": apiKey } }
- *
- * Overwrites any existing file wholesale — there is no merge logic and no
- * per-sub-provider editing under Zen billing (R15).
+ * Persist a Zen API key.
+ * Overwrites any existing file wholesale — there is no merge logic.
  */
 export function setOpenCodeKey(
   userId: number | string | undefined,
@@ -248,7 +246,9 @@ export function setOpenCodeKey(
     opencode: { type: 'api', key: apiKey },
   };
   fs.writeFileSync(authPath, JSON.stringify(payload), { mode: 0o600 });
-  fs.chmodSync(authPath, 0o600);
+  if (process.platform !== 'win32') {
+    fs.chmodSync(authPath, 0o600);
+  }
   return { authPath };
 }
 
@@ -265,7 +265,6 @@ export function clearOpenCodeKey(userId: number | string | undefined): boolean {
 }
 
 function fingerprint(value: string): string {
-  // Last 6 chars — same shape as claudeCredentials' / codexCredentials' fingerprint.
   return value.slice(-6);
 }
 
@@ -319,27 +318,8 @@ export interface OpenCodeSpawnEnv extends Record<string, string | undefined> {
   XDG_CONFIG_HOME: string;
   XDG_STATE_HOME: string;
   XDG_CACHE_HOME: string;
-  /**
-   * Keep gh pointed at the host's config dir even though XDG_CONFIG_HOME
-   * is pinned per-user for OpenCode isolation.
-   */
   GH_CONFIG_DIR: string;
-  /**
-   * Set to /dev/null so a worktree-local opencode.json cannot override
-   * our spawn config (see R13 in docs/opencode/00-context-decisions.md).
-   * Per-user config still applies via XDG_CONFIG_HOME.
-   */
   OPENCODE_CONFIG: string;
-  /**
-   * Inline config merged on top by OpenCode's loader (see
-   * `packages/opencode/src/config/config.ts`). We grant
-   * `external_directory: allow` so the `build` agent's `read`/`bash`
-   * tools don't hang on a permission prompt when an agent touches
-   * paths outside the worktree — most notably
-   * `~/.bottega/projects/.../task-*.md` (task docs) and the
-   * `${HOME}/.config/bottega/...` per-user state tree. Bottega is the
-   * only "user" of this OpenCode server, so always-allow is correct.
-   */
   OPENCODE_CONFIG_CONTENT: string;
 }
 
@@ -360,14 +340,7 @@ function resolveHostGhConfigDir(): string {
 }
 
 /**
- * Build the env handed to a spawned `opencode serve`. Strips every global
- * OpenCode env key so the per-user XDG_* paths + auth.json are
- * authoritative, then sets the per-user XDG_* paths and the
- * OPENCODE_CONFIG=/dev/null guard.
- *
- * gh reads credentials from XDG_CONFIG_HOME unless GH_CONFIG_DIR is set,
- * so we point GH_CONFIG_DIR at the host config before redirecting
- * XDG_CONFIG_HOME to the per-user OpenCode config dir.
+ * Build the env handed to a spawned `opencode serve`.
  */
 export function buildOpenCodeSpawnEnv(
   userId: number | string | undefined,

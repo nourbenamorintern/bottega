@@ -10,6 +10,7 @@ import type { Provider } from '@shared/providers/types';
 import { anthropicCredentialStore } from './anthropic.js';
 import { codexCredentialStore } from './openai.js';
 import { openCodeCredentialStore } from './opencode.js';
+import { githubCopilotCredentialStore } from './github-copilot.js';
 import type { ProviderCredentialStore } from './types.js';
 
 const STORES = new Map<Provider, ProviderCredentialStore>();
@@ -52,3 +53,4 @@ export function _resetForTests(): void {
 registerCredentialStore('anthropic', anthropicCredentialStore);
 registerCredentialStore('openai', codexCredentialStore);
 registerCredentialStore('opencode', openCodeCredentialStore);
+registerCredentialStore('github-copilot', githubCopilotCredentialStore);

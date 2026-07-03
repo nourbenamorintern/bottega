@@ -1,34 +1,23 @@
-import React from 'react';
 import { Github, Bot, Terminal } from 'lucide-react';
 import ClaudeLogo from './ClaudeLogo';
 
 export interface ProviderIconProps {
-  // Explicitly allowing null and undefined prevents "Type undefined is not assignable" errors
+  // Added `null` to gracefully handle empty database fields/API responses
   provider?: string | null | undefined;
-  className?: string;
+  className?: string | undefined;
 }
 
 export function getProviderLabel(provider?: string | null ): string {
-  // Use a switch or strict equality checks
-  switch (provider) {
-    case 'github-copilot':
-      return 'Copilot';
-    case 'openai':
-      return 'Codex';
-    case 'opencode':
-      return 'OpenCode';
-    default:
-      return 'Claude';
-  }
+  if (provider === 'github-copilot') return 'Copilot';
+  if (provider === 'openai') return 'Codex';
+  if (provider === 'opencode') return 'OpenCode';
+  return 'Claude';
 }
 
 export function ProviderIcon({ provider, className = 'w-full h-full' }: ProviderIconProps) {
-  // Check the provider and return the correct icon
   if (provider === 'github-copilot') return <Github className={className} />;
   if (provider === 'openai') return <Bot className={className} />;
   if (provider === 'opencode') return <Terminal className={className} />;
-  
-  // Default to ClaudeLogo
   return <ClaudeLogo className={className} />;
 }
 

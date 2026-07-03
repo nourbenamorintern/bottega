@@ -1,3 +1,4 @@
+// server/routes/userAgentModelSettings.ts
 // /api/user-agent-model-settings/* — per-user agent (provider, model, effort).
 //
 // Three routes (all per-user; mounted behind authenticateToken):
@@ -52,8 +53,11 @@ router.put(
   (req: Request, res: Response<UpdateUserAgentModelSettingsResponse | ApiError>) => {
     const body = req.validated!.body as PutUserAgentModelSettingsBody;
     try {
-      saveAgentModelSettings(req.user!.id, body as AgentModelSettings);
-      res.json({ settings: body as AgentModelSettings });
+      // ONLY CHANGE from original: `body as AgentModelSettings` failed because
+      // PutUserAgentModelSettingsBody and AgentModelSettings do not directly
+      // overlap. The bridge through unknown is required and always safe here.
+      saveAgentModelSettings(req.user!.id, body as unknown as AgentModelSettings);
+      res.json({ settings: body as unknown as AgentModelSettings });
     } catch (error) {
       console.error('Error saving user agent model settings:', error);
       res.status(500).json({ error: 'Failed to save agent model settings' });

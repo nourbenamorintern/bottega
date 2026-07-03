@@ -61,6 +61,7 @@
     "@codemirror/lang-python": "^6.2.1",
     "@codemirror/merge": "^6.11.1",
     "@codemirror/theme-one-dark": "^6.1.2",
+    "@github/copilot-sdk": "^1.0.4",
     "@onesignal/node-onesignal": "^5.3.1-beta1",
     "@openai/codex-sdk": "^0.130.0",
     "@opencode-ai/sdk": "1.15.5",

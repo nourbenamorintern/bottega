@@ -249,12 +249,30 @@ export async function startClaudeAuthLogin(
 
   // node-pty allocates a real PTY so the Claude CLI (an Ink/React app that
   // requires raw-mode stdin) runs normally and emits a single-line OAuth URL.
-  const claudeCli = process.env.CLAUDE_CLI_PATH || 'claude';
-  const child = pty.spawn(claudeCli, ['setup-token'], {
+  // Add .cmd so Windows knows how to execute the global script
+  // Check if running on Windows
+  const isWin = process.platform === 'win32';
+
+  // Windows needs an absolute path to a native terminal binary (like PowerShell) 
+  // rather than running .cmd hooks directly. Otherwise, node-pty throws 'File not found'.
+  const executable = isWin 
+    ? 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' 
+    : (process.env.CLAUDE_CLI_PATH || 'claude');
+
+  // Format arguments: run the command inside the shell environment on Windows
+  const args = isWin 
+    ? ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'claude', 'setup-token'] 
+    : ['setup-token'];
+
+  // Satisfy node-pty's strict type: { [key: string]: string | undefined }
+  const ptyEnv: { [key: string]: string | undefined } = { ...env };
+
+  const child = pty.spawn(executable, args, {
     name: 'xterm-256color',
     cols: 1000,
     rows: 30,
-    env: env as Record<string, string>,
+    env: ptyEnv,
+    useConpty: isWin ? false : undefined, // Improves standard stability for winpty loops
   });
 
   const startedAtMs = Date.now();

@@ -35,10 +35,11 @@ export interface ConversationOptions {
   conversationId?: number | undefined;
   images?: ConversationImage[] | undefined;
   /**
-   * Provider to stamp on the new conversation row. The runtime path still
-   * dispatches to Claude regardless of this value — full provider-aware
-   * dispatch lands once the orchestrator goes through the provider
-   * registry. Today this is purely a DB stamp + diagnostic.
+   * Provider to run this turn on. `startConversation`/`sendMessage` dispatch
+   * on this value: `'anthropic'` (or unset) takes the historical Claude SDK
+   * path in this file; `'openai'`, `'opencode'`, and `'github-copilot'` fork
+   * to their own `start*Conversation.ts` file, each of which drives the
+   * provider through `server/services/providers/registry.ts`.
    */
   provider?: Provider | undefined;
   /**

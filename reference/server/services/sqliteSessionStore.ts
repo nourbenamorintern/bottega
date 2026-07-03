@@ -22,12 +22,12 @@ interface SessionKey {
   /**
    * Which provider's entries are being appended. Anthropic entries
    * (default) feed `foldSessionSummary` so `listSessionSummaries`
-   * surfaces them; Codex and OpenCode entries are written verbatim and
-   * skip the summary fold — the SDK helper is typed for the Claude
-   * SessionStoreEntry shape and would mis-handle non-Claude
+   * surfaces them; Codex, OpenCode, and Copilot entries are written
+   * verbatim and skip the summary fold — the SDK helper is typed for the
+   * Claude SessionStoreEntry shape and would mis-handle non-Claude
    * UnifiedMessages.
    */
-  provider?: 'anthropic' | 'openai' | 'opencode';
+  provider?: 'anthropic' | 'openai' | 'opencode' | 'github-copilot';
 }
 
 interface ProjectSessionKey {

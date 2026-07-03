@@ -95,7 +95,7 @@ export function saveAgentModelSettings(userId: number, settings: AgentModelSetti
 }
 
 // Highest-priority connected provider wins when seeding a new user.
-const SEED_PROVIDER_PRIORITY: readonly Provider[] = ['anthropic', 'openai', 'opencode'];
+const SEED_PROVIDER_PRIORITY: readonly Provider[] = ['anthropic', 'openai', 'opencode', 'github-copilot'];
 
 /**
  * Seed a user's agent settings from their first connected provider, if they

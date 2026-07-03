@@ -1,13 +1,3 @@
-/**
- * ChatInterface.tsx - Chat Component for Task-Driven Workflow
- *
- * Architecture:
- * - Load messages via REST API when conversation selected
- * - Display messages (user, assistant, tool calls)
- * - Send messages via WebSocket
- * - Messages linked to task's conversation
- */
-
 import React, {
   useState,
   useEffect,
@@ -16,6 +6,7 @@ import React, {
   useRef,
   type FormEvent,
 } from 'react';
+
 import ClaudeStatus from './ClaudeStatus';
 import MessageInput from './MessageInput';
 import MessageComponent, { type DisplayMessage } from './MessageComponent';
@@ -23,6 +14,7 @@ import CommandMenu from './CommandMenu';
 import ContextDetailModal, {
   type ContextUsageData,
 } from './ContextDetailModal';
+import { getProviderLabel } from './ProviderIcon';
 import { api } from '../utils/api';
 import { useWebSocket } from '../contexts/WebSocketContext';
 import { useClaudeAuth } from '../contexts/ClaudeAuthContext';
@@ -44,8 +36,6 @@ import type {
 } from '@shared/websocket/messages';
 import type { Provider } from '@shared/providers/types';
 
-// ---- Local types ----
-
 interface SelectedProjectShape {
   id?: number;
   name?: string;
@@ -60,8 +50,6 @@ interface SelectedTaskShape {
 interface ActiveConversationShape {
   id?: number;
   claude_conversation_id?: ClaudeSessionId | null;
-  /** Which LLM backend runs this conversation. Defaults to 'anthropic'
-   *  for legacy rows that pre-date the column. */
   provider?: Provider;
   __initialMessage?: string;
   __permissionMode?: PermissionMode;
@@ -99,15 +87,12 @@ interface RawSdkMessage {
   timestamp?: string;
 }
 
-// ---- Helpers ----
-
 function convertSessionMessages(
   rawMessages: RawSdkMessage[],
 ): DisplayMessage[] {
   const converted: DisplayMessage[] = [];
   const toolResults = new Map<string, RawSdkBlock>();
 
-  // First pass: collect tool results
   for (const msg of rawMessages) {
     if (msg.type === 'user' && typeof msg.message === 'object' && msg.message?.content) {
       const content = msg.message.content;
@@ -121,7 +106,6 @@ function convertSessionMessages(
     }
   }
 
-  // Second pass: build message list
   for (const msg of rawMessages) {
     const timestamp = msg.timestamp ?? new Date().toISOString();
 
@@ -180,8 +164,6 @@ function convertSessionMessages(
   return converted;
 }
 
-// ---- Component ----
-
 function ChatInterface({
   selectedProject,
   activeConversation,
@@ -192,11 +174,10 @@ function ChatInterface({
   const [input, setInput] = useState('');
 
   const initialPermissionMode = activeConversation?.__permissionMode;
-
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(
     initialPermissionMode || 'bypassPermissions',
   );
-
+  
   useEffect(() => {
     if (initialPermissionMode) {
       setPermissionMode(initialPermissionMode);
@@ -205,23 +186,13 @@ function ChatInterface({
     }
   }, [activeConversation?.id, initialPermissionMode]);
 
-  // Context usage snapshot — drives both the gauge above the input and the
-  // detail popup. We keep `unknown` here because the wire payload comes from
-  // the SDK's getContextUsage() and we forward it verbatim to the modal.
-  const [contextUsage, setContextUsage] = useState<ContextUsageData | null>(
-    null,
-  );
+  const [contextUsage, setContextUsage] = useState<ContextUsageData | null>(null);
   const [showContextModal, setShowContextModal] = useState(false);
-
-  const [openAskPanel, setOpenAskPanel] =
-    useState<AskUserQuestionPanelState | null>(null);
-
-  const projectPath =
-    selectedProject?.repo_folder_path || selectedProject?.path;
+  const [openAskPanel, setOpenAskPanel] = useState<AskUserQuestionPanelState | null>(null);
+  const projectPath = selectedProject?.repo_folder_path || selectedProject?.path;
   const {
     slashCommands,
     showCommandMenu,
-    commandQuery: _commandQuery,
     filteredCommands,
     selectedCommandIndex,
     handleSlashDetected,
@@ -230,41 +201,30 @@ function ChatInterface({
     handleToggleCommandMenu,
   } = useSlashCommands(projectPath);
 
-  const inputTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // FIX: Type properly matching RefObject interface 
+  const inputTextareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const { isConnected, sendMessage, subscribe, unsubscribe, onDisconnect } =
-    useWebSocket();
-  const { requireClaudeAuth } = useClaudeAuth() as {
-    requireClaudeAuth: () => boolean;
-  };
+  const { isConnected, sendMessage, subscribe, unsubscribe, onDisconnect } = useWebSocket();
+  const { requireClaudeAuth } = useClaudeAuth() as { requireClaudeAuth: () => boolean; };
   const { toast } = useToast();
 
-  // Subscribe this WebSocket to conversation-channel messages
-  // (claude-response, claude-status, claude-complete, claude-error,
-  // session-created, context-usage, conversation-name-updated,
-  // awaiting-user-answer). The hook handles subscribe/unsubscribe lifecycle
-  // and reconnect resubscription.
   useConversationSubscription(activeConversation?.id ?? null);
 
-  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [hasNewMessages, setHasNewMessages] = useState(false);
   const [isScrolling, setIsScrolling] = useState(false);
   const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   const userScrollIntentRef = useRef(false);
-  const userScrollIntentTimeoutRef = useRef<ReturnType<
-    typeof setTimeout
-  > | null>(null);
+  const userScrollIntentTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isProgrammaticScrollRef = useRef(false);
   const reconnectCooldownRef = useRef(false);
-
   const wasConnectedRef = useRef(false);
   const isRefreshingRef = useRef(false);
 
   const claudeSessionId = activeConversation?.claude_conversation_id ?? null;
-
   const conversationId = activeConversation?.id;
+  
   const refreshSessionMessages = useCallback(async () => {
     if (!conversationId) {
       setSessionMessages([]);
@@ -272,7 +232,7 @@ function ChatInterface({
     }
 
     try {
-      const response = await (api.conversations.getMessages)(conversationId, 1000, 0);
+      const response = await api.conversations.getMessages(conversationId, 1000, 0);
       if (response.ok) {
         const data = await response.json();
         const msgs = Array.isArray(data) ? data : data.messages;
@@ -286,11 +246,11 @@ function ChatInterface({
       setSessionMessages([]);
     }
   }, [conversationId]);
-
+  
   const handleStreamingComplete = useCallback(async () => {
     await refreshSessionMessages();
   }, [refreshSessionMessages]);
-
+  
   const sessionForStreaming = useMemo(() => {
     if (!claudeSessionId) return null;
     return {
@@ -298,7 +258,7 @@ function ChatInterface({
       __provider: 'claude',
     };
   }, [claudeSessionId]);
-
+  
   const {
     streamingMessages,
     setStreamingMessages,
@@ -316,12 +276,9 @@ function ChatInterface({
     unsubscribe,
     onMessagesRefresh: handleStreamingComplete,
     onDisconnect,
-    // The server rejects a send when a turn is already in flight for this
-    // conversation (one conversation = one process). Surface why.
     onBusy: (message: string) => toast.error(message),
   });
-
-  // Display initial message from NewConversationModal immediately
+  
   useEffect(() => {
     if (activeConversation?.__initialMessage && sessionMessages.length === 0) {
       setStreamingMessages([
@@ -341,16 +298,11 @@ function ChatInterface({
 
   const handleContextUsage = useCallback(
     (message: ServerMessageOf<'context-usage'>) => {
-      // `data` is intentionally `unknown` on the WS message — see
-      // shared/websocket/messages.ts for the hybrid baseline+breakdown
-      // shape rationale. Narrow structurally to the modal's expected shape.
       setContextUsage(message.data as ContextUsageData);
     },
     [],
   );
-
-  // Reset + hydrate cached snapshot whenever the active conversation changes,
-  // so the gauge has a value even before the next turn streams.
+  
   useEffect(() => {
     if (!conversationId) {
       setContextUsage(null);
@@ -372,53 +324,44 @@ function ChatInterface({
       cancelled = true;
     };
   }, [conversationId]);
-
+  
   const handleModeChange = useCallback(
     (newMode: PermissionMode) => {
       setPermissionMode(newMode);
       if (activeConversation?.id) {
-        localStorage.setItem(
-          `permissionMode-conv-${activeConversation.id}`,
-          newMode,
-        );
+        localStorage.setItem(`permissionMode-conv-${activeConversation.id}`, newMode);
       }
     },
     [activeConversation?.id],
   );
-
+  
   const handleCommandSelect = useCallback(
     (command: SlashCommand, index: number, isHover: boolean) => {
       hookCommandSelect(command, index, isHover, input, setInput);
     },
     [hookCommandSelect, input, setInput],
   );
-
+  
   const handleOpenAskUserPanel = useCallback(
     (toolId: string, questions: Question[]) => {
       setOpenAskPanel({ toolId, questions });
     },
     [],
   );
-
+  
   const handleDismissAskUserPanel = useCallback(() => {
     setOpenAskPanel(null);
   }, []);
-
-  // Subscribe to context-usage updates. (Conversation-level subscription
-  // acks are handled by useConversationSubscription itself.)
+  
   useEffect(() => {
     if (!activeConversation) return;
-
-    const handleContextUsageMsg = (msg: ServerMessageOf<'context-usage'>) =>
-      handleContextUsage(msg);
-
+    const handleContextUsageMsg = (msg: ServerMessageOf<'context-usage'>) => handleContextUsage(msg);
     subscribe('context-usage', handleContextUsageMsg);
-
     return () => {
       unsubscribe('context-usage', handleContextUsageMsg);
     };
   }, [activeConversation, subscribe, unsubscribe, handleContextUsage]);
-
+  
   const sendUserCommand = useCallback(
     (messageText: string) => {
       setIsSending(true);
@@ -451,32 +394,18 @@ function ChatInterface({
       setStreamingMessages,
     ],
   );
-
+  
   const handleSubmit = useCallback(
     (e: FormEvent) => {
       e.preventDefault();
-      if (
-        !input.trim() ||
-        isSending ||
-        isStreaming ||
-        !selectedProject ||
-        !isConnected
-      )
-        return;
-
+      if (!input.trim() || isSending || isStreaming || !selectedProject || !isConnected) return;
       if (!claudeSessionId) {
-        console.error(
-          '[ChatInterface] Cannot send message: no claude session ID',
-        );
+        console.error('[ChatInterface] Cannot send message: no claude session ID');
         return;
       }
-
-      // Only Anthropic conversations need a Claude OAuth token; OpenAI/OpenCode
-      // sessions authenticate with their own server-side credentials.
       if (activeConversation?.provider === 'anthropic' && !requireClaudeAuth()) {
         return;
       }
-
       const messageText = input.trim();
       setInput('');
       sendUserCommand(messageText);
@@ -493,7 +422,7 @@ function ChatInterface({
       sendUserCommand,
     ],
   );
-
+  
   const displayMessages = useMemo<DisplayMessage[]>(() => {
     const historyMessages = convertSessionMessages(sessionMessages);
     if (streamingMessages.length > 0) {
@@ -504,9 +433,10 @@ function ChatInterface({
     }
     return historyMessages;
   }, [sessionMessages, streamingMessages]);
-
+  
   const askWidgetStatesRef = useRef<Map<string, AskWidgetState>>(new Map());
   const askWidgetStatesSignatureRef = useRef('');
+  
   const askWidgetStates = useMemo(() => {
     const idx = indexAskWidgets(displayMessages);
     const next = new Map<string, AskWidgetState>();
@@ -530,12 +460,10 @@ function ChatInterface({
     askWidgetStatesRef.current = next;
     return next;
   }, [displayMessages]);
-
+  
   const handleAskUserSubmit = useCallback(
     (_formatted: unknown, structured: Record<string, string> | null) => {
       if (!openAskPanel || !isConnected || !claudeSessionId) return;
-      // AskUserQuestion is Claude-only today, but gate on the provider anyway
-      // so a non-Anthropic conversation never pops the Claude-auth modal.
       if (activeConversation?.provider === 'anthropic' && !requireClaudeAuth()) return;
       if (
         structured &&
@@ -562,21 +490,16 @@ function ChatInterface({
     ],
   );
 
-  // Reset modal when conversation changes
   useEffect(() => {
     setOpenAskPanel(null);
   }, [activeConversation?.id]);
-
-  // Load messages when conversation changes.
-  // For NEW conversations: skip loading - use __initialMessage + WS streaming.
-  // For RESUMED conversations: load history from JSONL via REST API.
+  
   useEffect(() => {
     async function loadMessages() {
       if (!activeConversation) {
         setSessionMessages([]);
         return;
       }
-
       if (activeConversation.__initialMessage) {
         setSessionMessages([]);
         return;
@@ -588,7 +511,7 @@ function ChatInterface({
           setSessionMessages([]);
           return;
         }
-        const response = await (api.conversations.getMessages)(activeConversation.id, 1000, 0);
+        const response = await api.conversations.getMessages(activeConversation.id, 1000, 0);
         if (response.ok) {
           const data = await response.json();
           const msgs = Array.isArray(data) ? data : data.messages;
@@ -604,28 +527,19 @@ function ChatInterface({
         setIsLoading(false);
       }
     }
-
     void loadMessages();
   }, [activeConversation?.id]);
 
-  // Load permission mode when conversation changes
   useEffect(() => {
     if (initialPermissionMode) return;
-
     if (activeConversation?.id) {
-      const savedMode = localStorage.getItem(
-        `permissionMode-conv-${activeConversation.id}`,
-      ) as PermissionMode | null;
+      const savedMode = localStorage.getItem(`permissionMode-conv-${activeConversation.id}`) as PermissionMode | null;
       setPermissionMode(savedMode || 'bypassPermissions');
     } else {
       setPermissionMode('bypassPermissions');
     }
   }, [activeConversation?.id, initialPermissionMode]);
-
-  // Clear streaming UI state when switching to a different conversation —
-  // the previous conversation's in-flight events do not belong to this view.
-  // (Subscription lifecycle is handled by `useConversationSubscription`
-  // above; this effect only owns the per-view UI reset.)
+  
   const lastConversationIdRef = useRef<number | null>(null);
   useEffect(() => {
     const newId = activeConversation?.id ?? null;
@@ -636,8 +550,7 @@ function ChatInterface({
       setIsStreaming(false);
     }
   }, [activeConversation?.id, setStreamingMessages, setIsStreaming]);
-
-  // Cooldown after WebSocket reconnection to ignore scroll events
+  
   useEffect(() => {
     if (isConnected) {
       reconnectCooldownRef.current = true;
@@ -647,20 +560,14 @@ function ChatInterface({
       return () => clearTimeout(timeout);
     }
   }, [isConnected]);
-
-  // State sync on reconnect. `useConversationSubscription` already
-  // resubscribes this client when the WS comes back; here we only need to
-  // sync `isStreaming` / `isSending` (`check-session-status`) and backfill
-  // any messages that streamed while disconnected (REST).
+  
   useEffect(() => {
     const wasConnected = wasConnectedRef.current;
     wasConnectedRef.current = isConnected;
 
     if (isConnected && !wasConnected && claudeSessionId) {
       console.log('[ChatInterface] Reconnected, syncing state...');
-
       sendMessage('check-session-status', { sessionId: claudeSessionId });
-
       if (!isRefreshingRef.current) {
         isRefreshingRef.current = true;
         void refreshSessionMessages().finally(() => {
@@ -669,15 +576,12 @@ function ChatInterface({
       }
     }
   }, [isConnected, claudeSessionId, sendMessage, refreshSessionMessages]);
-
-  // session-status response sync
+  
   useEffect(() => {
     const handleSessionStatus = (msg: ServerMessageOf<'session-status'>) => {
       if (msg.sessionId === claudeSessionId) {
         if (!msg.isProcessing && (isSending || isStreaming)) {
-          console.log(
-            '[ChatInterface] Syncing: Server finished, clearing UI state',
-          );
+          console.log('[ChatInterface] Syncing: Server finished, clearing UI state');
           setIsSending(false);
           setIsStreaming(false);
           if (!isRefreshingRef.current) {
@@ -687,14 +591,7 @@ function ChatInterface({
             });
           }
         } else if (msg.isProcessing && !isStreaming) {
-          // Inverse sync: the server still has a turn in flight but this
-          // client thinks it's idle (e.g. it missed `streaming-started`
-          // across a reconnect). Light the streaming state so the composer
-          // disables — otherwise the user can fire a message into a live
-          // turn, which the backend now rejects as `conversation-busy`.
-          console.log(
-            '[ChatInterface] Syncing: Server still processing, marking streaming',
-          );
+          console.log('[ChatInterface] Syncing: Server still processing, marking streaming');
           setIsStreaming(true);
         }
       }
@@ -712,7 +609,7 @@ function ChatInterface({
     setIsSending,
     setIsStreaming,
   ]);
-
+  
   const markProgrammaticScroll = useCallback(() => {
     isProgrammaticScrollRef.current = true;
     requestAnimationFrame(() => {
@@ -721,7 +618,7 @@ function ChatInterface({
       });
     });
   }, []);
-
+  
   const handleScroll = useCallback(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
@@ -742,19 +639,18 @@ function ChatInterface({
     if (reconnectCooldownRef.current) return;
 
     const COLLAPSE_THRESHOLD = -200;
+   
     if (scrollPos < COLLAPSE_THRESHOLD) {
       setIsScrolling(true);
-
       if (scrollTimeoutRef.current) {
         clearTimeout(scrollTimeoutRef.current);
       }
-
       scrollTimeoutRef.current = setTimeout(() => {
         setIsScrolling(false);
       }, 150);
     }
   }, [isStreaming]);
-
+  
   useEffect(() => {
     const container = messagesContainerRef.current;
     if (container) {
@@ -767,8 +663,7 @@ function ChatInterface({
       };
     }
   }, [handleScroll]);
-
-  // Listen for user scroll-intent signals (touch, wheel, mouse)
+  
   useEffect(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
@@ -783,18 +678,10 @@ function ChatInterface({
       }, 200);
     };
 
-    container.addEventListener('touchstart', handleUserScrollIntent, {
-      passive: true,
-    });
-    container.addEventListener('touchmove', handleUserScrollIntent, {
-      passive: true,
-    });
-    container.addEventListener('wheel', handleUserScrollIntent, {
-      passive: true,
-    });
-    container.addEventListener('mousedown', handleUserScrollIntent, {
-      passive: true,
-    });
+    container.addEventListener('touchstart', handleUserScrollIntent, { passive: true });
+    container.addEventListener('touchmove', handleUserScrollIntent, { passive: true });
+    container.addEventListener('wheel', handleUserScrollIntent, { passive: true });
+    container.addEventListener('mousedown', handleUserScrollIntent, { passive: true });
 
     return () => {
       container.removeEventListener('touchstart', handleUserScrollIntent);
@@ -806,13 +693,13 @@ function ChatInterface({
       }
     };
   }, []);
-
+  
   useEffect(() => {
     if (streamingMessages.length > 0 && !isAtBottom) {
       setHasNewMessages(true);
     }
   }, [streamingMessages.length, isAtBottom]);
-
+  
   const scrollToBottom = useCallback(() => {
     const container = messagesContainerRef.current;
     if (container) {
@@ -821,14 +708,14 @@ function ChatInterface({
     }
     setHasNewMessages(false);
   }, [markProgrammaticScroll]);
-
+  
   useEffect(() => {
     if (isAtBottom && messagesContainerRef.current) {
       markProgrammaticScroll();
       messagesContainerRef.current.scrollTop = 0;
     }
   }, [displayMessages.length, isAtBottom, markProgrammaticScroll]);
-
+  
   if (isLoading) {
     return (
       <div className="h-full flex items-center justify-center">
@@ -853,16 +740,14 @@ function ChatInterface({
             <div className="text-center py-12 text-muted-foreground">
               <p className="text-lg mb-2">Start a conversation</p>
               <p className="text-sm">
-                Type a message below to begin chatting with Claude about this
-                task.
+                Type a message below to begin chatting with{' '}
+                {getProviderLabel(activeConversation?.provider)} about this task.
               </p>
             </div>
           ) : (
             displayMessages.map((message, index) => {
-              const prevMessage =
-                index > 0 ? displayMessages[index - 1] : null;
-              const isGrouped =
-                !!prevMessage && prevMessage.type === message.type;
+              const prevMessage = index > 0 ? displayMessages[index - 1] : null;
+              const isGrouped = !!prevMessage && prevMessage.type === message.type;
 
               if (message.type === 'thinking' && !showThinking) {
                 return null;
@@ -874,13 +759,17 @@ function ChatInterface({
                 message.toolId
                   ? askWidgetStates.get(message.toolId)
                   : undefined;
+              
+              // FIX: Used the null coalescing operator to prevent passing undefined 
+              // if the component explicitly expects an object or strictly null
               return (
                 <MessageComponent
                   key={index}
                   message={message}
                   isGrouped={isGrouped}
-                  askWidgetState={askWidgetState}
+                  askWidgetState={askWidgetState ?? null}
                   onOpenAskUserPanel={handleOpenAskUserPanel}
+                  provider={activeConversation?.provider}
                 />
               );
             })
@@ -893,18 +782,8 @@ function ChatInterface({
           onClick={scrollToBottom}
           className="absolute bottom-20 left-1/2 -translate-x-1/2 px-4 py-2 bg-primary text-primary-foreground rounded-full shadow-lg flex items-center gap-2 hover:bg-primary/90 transition-colors z-10"
         >
-          <svg
-            className="w-4 h-4"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M19 14l-7 7m0 0l-7-7m7 7V3"
-            />
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
           </svg>
           New messages
         </button>
@@ -914,13 +793,7 @@ function ChatInterface({
         status={claudeStatus}
         isLoading={isSending || isStreaming}
         onAbort={handleAbortSession}
-        provider={
-          activeConversation?.provider === 'openai'
-            ? 'codex'
-            : activeConversation?.provider === 'opencode'
-              ? 'opencode'
-              : 'claude'
-        }
+        provider={activeConversation?.provider}
       />
 
       {openAskPanel && (
@@ -964,18 +837,13 @@ function ChatInterface({
         onClose={handleCloseCommandMenu}
         position={{
           top: inputTextareaRef.current
-            ? Math.max(
-                16,
-                inputTextareaRef.current.getBoundingClientRect().top - 316,
-              )
+            ? Math.max(16, inputTextareaRef.current.getBoundingClientRect().top - 316)
             : 0,
           left: inputTextareaRef.current
             ? inputTextareaRef.current.getBoundingClientRect().left
             : 16,
           bottom: inputTextareaRef.current
-            ? window.innerHeight -
-              inputTextareaRef.current.getBoundingClientRect().top +
-              8
+            ? window.innerHeight - inputTextareaRef.current.getBoundingClientRect().top + 8
             : 90,
         }}
         isOpen={showCommandMenu && filteredCommands.length > 0}

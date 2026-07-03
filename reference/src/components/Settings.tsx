@@ -12,6 +12,7 @@ import ApiKeyPanel from './ApiKeyPanel';
 import CodexAuthPanel from './CodexAuthPanel';
 import ClaudeAuthPanel from './ClaudeAuthPanel';
 import OpenCodeAuthPanel from './OpenCodeAuthPanel';
+import CopilotAuthPanel from './CopilotAuthPanel';
 import type { ProjectRow } from '../../shared/types/db';
 import type { ApiError } from '../../shared/api/_common';
 
@@ -695,6 +696,8 @@ function Settings({
                 <CodexAuthPanel />
                 <div className="border-t border-border" />
                 <OpenCodeAuthPanel />
+                <div className="border-t border-border" />
+                <CopilotAuthPanel />
               </div>
             )}
 

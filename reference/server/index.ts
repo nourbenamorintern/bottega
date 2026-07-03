@@ -64,6 +64,7 @@ import accountRoutes from './routes/account.js';
 import claudeAuthRoutes from './routes/claudeAuth.js';
 import codexAuthRoutes from './routes/codexAuth.js';
 import openCodeAuthRoutes from './routes/openCodeAuth.js';
+import copilotAuthRoutes from './routes/copilotAuth.js';
 import commandsRoutes from './routes/commands.js';
 import projectsRoutes from './routes/projects.js';
 import tasksRoutes from './routes/tasks.js';
@@ -191,6 +192,7 @@ app.use('/api/account', accountRoutes);
 app.use('/api/claude-auth', authenticateToken, claudeAuthRoutes);
 app.use('/api/codex-auth', authenticateToken, codexAuthRoutes);
 app.use('/api/opencode-auth', authenticateToken, openCodeAuthRoutes);
+app.use('/api/copilot-auth', authenticateToken, copilotAuthRoutes);
 
 app.use('/api/commands', authenticateToken, commandsRoutes);
 

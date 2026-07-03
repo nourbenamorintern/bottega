@@ -132,6 +132,14 @@ import type {
   SetOpenCodeKeyResponse,
 } from '../../shared/api/openCodeAuth';
 import type {
+  CopilotAuthStatusResponse,
+  StartCopilotAuthResponse,
+  CopilotPollStatus,
+  CancelCopilotAuthResponse,
+  DisconnectCopilotAuthResponse,
+  CopilotModelsResponse,
+} from '../../shared/api/copilotAuth';
+import type {
   ConnectedProvidersResponse,
   GetUserAgentModelSettingsResponse,
   UpdateUserAgentModelSettingsResponse,
@@ -304,6 +312,29 @@ export const api = {
       authenticatedFetch<ClearCodexAuthResponse>('/api/codex-auth', {
         method: 'DELETE',
       }),
+  },
+
+  copilotAuth: {
+    status: (): TypedFetch<CopilotAuthStatusResponse> =>
+      authenticatedFetch<CopilotAuthStatusResponse>('/api/copilot-auth/status'),
+    start: (): TypedFetch<StartCopilotAuthResponse> =>
+      authenticatedFetch<StartCopilotAuthResponse>('/api/copilot-auth/start', {
+        method: 'POST',
+      }),
+    poll: (sessionId: string): TypedFetch<CopilotPollStatus> =>
+      authenticatedFetch<CopilotPollStatus>(
+        `/api/copilot-auth/poll?sessionId=${encodeURIComponent(sessionId)}`,
+      ),
+    cancel: (): TypedFetch<CancelCopilotAuthResponse> =>
+      authenticatedFetch<CancelCopilotAuthResponse>('/api/copilot-auth/cancel', {
+        method: 'POST',
+      }),
+    disconnect: (): TypedFetch<DisconnectCopilotAuthResponse> =>
+      authenticatedFetch<DisconnectCopilotAuthResponse>('/api/copilot-auth/disconnect', {
+        method: 'DELETE',
+      }),
+    models: (): TypedFetch<CopilotModelsResponse> =>
+      authenticatedFetch<CopilotModelsResponse>('/api/copilot-auth/models'),
   },
 
   account: {

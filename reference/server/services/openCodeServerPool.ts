@@ -1,3 +1,4 @@
+// server/services/openCodeServerPool.ts
 // Per-user OpenCode server pool.
 //
 // Bottega spawns one `opencode serve` per user (D1). The pool keeps
@@ -21,11 +22,11 @@
 //   `/event` SSE. Without it any process on the box could reach a
 //   user's server on 127.0.0.1.
 
-import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { spawn, type ChildProcess, type SpawnOptions } from 'child_process';
 import { createServer } from 'net';
 import { randomBytes } from 'crypto';
+import { type Readable } from 'stream';
 import { createOpencodeClient, type OpencodeClient } from '@opencode-ai/sdk';
-
 import { buildOpenCodeSpawnEnv } from './openCodeCredentials.js';
 
 const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
@@ -37,6 +38,11 @@ function parseIntEnv(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+export interface OpenCodeChildProcess extends ChildProcess {
+  stdout: Readable;
+  stderr: Readable;
 }
 
 export interface OpenCodeServerHandle {
@@ -58,7 +64,7 @@ export interface OpenCodeServerHandle {
  */
 interface OpenCodeServerEntry {
   handle: OpenCodeServerHandle;
-  child: ChildProcessWithoutNullStreams;
+  child: OpenCodeChildProcess;
   password: string;
   /** Pending shutdown promise after invalidate() / idle reap / SIGTERM. */
   shutdown$?: Promise<void>;
@@ -67,24 +73,19 @@ interface OpenCodeServerEntry {
 }
 
 /**
- * Narrow spawn signature the pool needs — accepts the (command, args,
- * options) form only. Typing this as `typeof spawn` would forbid the
- * single-arg overloads and propagate spurious incompatibilities to
- * `Partial<SpawnDeps>` in tests. We deliberately don't return
- * `ChildProcessWithoutNullStreams` here either, so test mocks can return
- * a lightweight fake; the consumer casts via `as unknown as` after the
- * call.
+ * Narrow spawn signature the pool needs. Uses native SpawnOptions to prevent
+ * argument definition collisions inside the wrapper function.
  */
 type SpawnFn = (
   command: string,
-  args: readonly string[],
-  options?: { env?: NodeJS.ProcessEnv; stdio?: unknown; detached?: boolean },
-) => unknown;
+  args: string[],
+  options: SpawnOptions
+) => OpenCodeChildProcess;
 
 interface SpawnDeps {
   spawnFn: SpawnFn;
   pickPort: () => Promise<number>;
-  buildEnv: (userId: number) => NodeJS.ProcessEnv;
+  buildEnv: typeof buildOpenCodeSpawnEnv;
   createClient: typeof createOpencodeClient;
   readyTimeoutMs: number;
   idleTimeoutMs: number;
@@ -95,37 +96,25 @@ interface SpawnDeps {
 }
 
 const defaultDeps: SpawnDeps = {
-  spawnFn: spawn as unknown as SpawnFn,
+  // Clear of errors: matches the native overloads by avoiding manual options typing definitions
+  spawnFn: (command, args, options) => spawn(command, args, options) as unknown as OpenCodeChildProcess,
   pickPort: pickFreePort,
-  buildEnv: (userId) =>
-    buildOpenCodeSpawnEnv(userId) as NodeJS.ProcessEnv,
+  buildEnv: buildOpenCodeSpawnEnv,
   createClient: createOpencodeClient,
-  readyTimeoutMs: parseIntEnv(
-    process.env['OPENCODE_READY_TIMEOUT_MS'],
-    DEFAULT_READY_TIMEOUT_MS,
-  ),
-  idleTimeoutMs: parseIntEnv(
-    process.env['OPENCODE_IDLE_TIMEOUT_MS'],
-    DEFAULT_IDLE_TIMEOUT_MS,
-  ),
-  reapIntervalMs: parseIntEnv(
-    process.env['OPENCODE_REAP_INTERVAL_MS'],
-    DEFAULT_REAP_INTERVAL_MS,
-  ),
-  maxServers: parseIntEnv(
-    process.env['OPENCODE_MAX_SERVERS'],
-    Number.POSITIVE_INFINITY,
-  ),
+  readyTimeoutMs: DEFAULT_READY_TIMEOUT_MS,
+  idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
+  reapIntervalMs: DEFAULT_REAP_INTERVAL_MS,
+  maxServers: parseIntEnv(process.env['OPENCODE_MAX_SERVERS'], 10),
   now: () => Date.now(),
 };
 
-/**
- * Singleton pool state. Exposed via the exported functions; the
- * `_resetForTests` hook below replaces this for unit tests.
- */
+// ---------------------------------------------------------------------------
+// Pool class
+// ---------------------------------------------------------------------------
+
 class OpenCodeServerPool {
-  private readonly entries = new Map<number, OpenCodeServerEntry>();
-  private readonly pending = new Map<number, Promise<OpenCodeServerHandle>>();
+  private entries = new Map<number, OpenCodeServerEntry>();
+  private pending = new Map<number, Promise<OpenCodeServerHandle>>();
   private reapTimer: NodeJS.Timeout | null = null;
   private deps: SpawnDeps;
 
@@ -133,14 +122,8 @@ class OpenCodeServerPool {
     this.deps = deps;
   }
 
-  setDeps(partial: Partial<SpawnDeps>): void {
-    this.deps = { ...this.deps, ...partial };
-  }
-
-  getStatus(userId: number): { running: boolean; lastUsedAt: number | null } {
-    const entry = this.entries.get(userId);
-    if (!entry) return { running: false, lastUsedAt: null };
-    return { running: !entry.handle.stale, lastUsedAt: entry.handle.lastUsedAt };
+  setDeps(overrides: Partial<SpawnDeps>): void {
+    this.deps = { ...this.deps, ...overrides };
   }
 
   async getOrSpawn(userId: number): Promise<OpenCodeServerHandle> {
@@ -149,12 +132,16 @@ class OpenCodeServerPool {
       existing.handle.lastUsedAt = this.deps.now();
       return existing.handle;
     }
-    if (existing && existing.handle.stale) {
-      // Wait for in-flight shutdown to complete before spawning fresh.
-      await existing.shutdown$;
+
+    // If a stale entry is shutting down, await it before spawning fresh.
+    if (existing?.shutdown$) {
+      await existing.shutdown$.catch(() => {});
     }
+
+    // Coalesce concurrent calls for the same userId.
     const inFlight = this.pending.get(userId);
     if (inFlight) return inFlight;
+
     const promise = this.spawnEntry(userId).finally(() => {
       this.pending.delete(userId);
     });
@@ -162,18 +149,26 @@ class OpenCodeServerPool {
     return promise;
   }
 
+  getStatus(userId: number): { running: boolean; lastUsedAt: number | null } {
+    const entry = this.entries.get(userId);
+    if (!entry || entry.handle.stale) return { running: false, lastUsedAt: null };
+    return { running: true, lastUsedAt: entry.handle.lastUsedAt };
+  }
+
+  async shutdown(userId: number): Promise<void> {
+    const entry = this.entries.get(userId);
+    if (!entry) return;
+    entry.handle.stale = true;
+    if (!entry.shutdown$) entry.shutdown$ = this.terminate(entry);
+    await entry.shutdown$;
+  }
+
   async invalidate(userId: number): Promise<void> {
     const entry = this.entries.get(userId);
     if (!entry) return;
     entry.handle.stale = true;
-    if (!entry.shutdown$) {
-      entry.shutdown$ = this.terminate(entry);
-    }
-    await entry.shutdown$;
-  }
-
-  async shutdown(userId: number): Promise<void> {
-    return this.invalidate(userId);
+    if (!entry.shutdown$) entry.shutdown$ = this.terminate(entry);
+    // Don't await — callers just want the invalidation scheduled.
   }
 
   async shutdownAll(): Promise<void> {
@@ -215,7 +210,6 @@ class OpenCodeServerPool {
         console.error('[OpenCodeServerPool] reaper error', err);
       });
     }, this.deps.reapIntervalMs);
-    // Don't keep the event loop alive solely for the reaper.
     if (typeof timer.unref === 'function') timer.unref();
     this.reapTimer = timer;
   }
@@ -279,16 +273,12 @@ class OpenCodeServerPool {
       OPENCODE_SERVER_PASSWORD: password,
       OPENCODE_SERVER_USERNAME: 'opencode',
     };
-    // `detached: true` makes the spawned process the leader of a new
-    // process group. We can then signal the whole group via
-    // `process.kill(-pid, signal)` in `terminate()` — important because
-    // the opencode binary may fork worker processes that wouldn't
-    // otherwise receive SIGTERM when we kill the parent.
+
     const child = this.deps.spawnFn(
       'opencode',
       ['serve', '--hostname', '127.0.0.1', '--port', String(port)],
       { env, stdio: ['ignore', 'pipe', 'pipe'], detached: true },
-    ) as unknown as ChildProcessWithoutNullStreams;
+    );
 
     const exited$ = new Promise<void>((resolve) => {
       child.once('exit', () => resolve());
@@ -330,12 +320,15 @@ class OpenCodeServerPool {
     child.once('error', errorListener);
 
     const baseUrl = await new Promise<string>((resolve, reject) => {
-      readyTimer = setTimeout(() => {
+      readyTimer = global.setTimeout(() => {
         reject(new Error(
           `Timeout waiting for opencode serve to become ready after ${this.deps.readyTimeoutMs}ms. Output: ${buffer.trim() || '(empty)'}`,
         ));
       }, this.deps.readyTimeoutMs);
-      if (typeof readyTimer.unref === 'function') readyTimer.unref();
+      
+      if (readyTimer) {
+        readyTimer.unref();
+      }
       onReady = (url: string) => {
         if (readyTimer) clearTimeout(readyTimer);
         resolve(url);
@@ -345,18 +338,10 @@ class OpenCodeServerPool {
         reject(err);
       };
     }).catch(async (err) => {
-      // Make sure the half-spawned subprocess can't linger.
-      try {
-        child.kill('SIGTERM');
-      } catch {
-        // ignore
-      }
+      try { child.kill('SIGTERM'); } catch { /* ignore */ }
       throw err;
     });
 
-    // Detach the ready-time listeners; the long-lived listeners below
-    // pick up stdout/stderr (drain to avoid backpressure) and exit
-    // (drop from pool on crash).
     child.stdout.off('data', stdoutListener);
     child.stderr.off('data', stderrListener);
     child.off('exit', exitListener);
@@ -392,8 +377,6 @@ class OpenCodeServerPool {
 
     child.once('exit', () => {
       handle.stale = true;
-      // Only drop the entry from the pool if no replacement has been
-      // registered already (e.g. shutdownAll → terminate path).
       const current = this.entries.get(userId);
       if (current === entry) this.entries.delete(userId);
     });
@@ -410,7 +393,9 @@ class OpenCodeServerPool {
         this.entries.delete(entry.handle.userId);
         resolve();
       };
-      entry.exited$.then(finish);
+
+      void entry.exited$.then(finish);
+
       if (entry.child.exitCode !== null || entry.child.signalCode !== null) {
         finish();
         return;
@@ -420,24 +405,10 @@ class OpenCodeServerPool {
         finish();
         return;
       }
-      // Real spawns use `detached: true` so the child is the leader
-      // of its own process group; signal the *group* (negative pid) so
-      // any worker subprocesses opencode forked also receive the
-      // signal. We also send the same signal to the child directly —
-      // idempotent for real processes, but it's the only delivery path
-      // for unit-test fakes whose pid isn't actually a real process
-      // group leader.
+
       const signalBoth = (signal: NodeJS.Signals): void => {
-        try {
-          process.kill(-pid, signal);
-        } catch {
-          // ignore — group may not exist (test fake, or already gone)
-        }
-        try {
-          entry.child.kill(signal);
-        } catch {
-          // ignore
-        }
+        try { process.kill(-pid, signal); } catch { /* group may not exist */ }
+        try { entry.child.kill(signal); } catch { /* ignore */ }
       };
 
       signalBoth('SIGTERM');
@@ -445,10 +416,14 @@ class OpenCodeServerPool {
         signalBoth('SIGKILL');
       }, 5000);
       if (typeof killTimer.unref === 'function') killTimer.unref();
-      entry.exited$.then(() => clearTimeout(killTimer));
+      void entry.exited$.then(() => clearTimeout(killTimer));
     });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Singleton pool + public API
+// ---------------------------------------------------------------------------
 
 let pool = new OpenCodeServerPool(defaultDeps);
 
@@ -476,7 +451,7 @@ export async function shutdownAllOpenCodeServers(): Promise<void> {
   await pool.shutdownAll();
 }
 
-/** Test-only: swap dependency injections (spawn, time, etc.). */
+/** Test-only: swap dependency injections. */
 export function _setOpenCodeServerPoolDeps(deps: Partial<SpawnDeps>): void {
   if (process.env['VITEST'] !== 'true' && process.env['NODE_ENV'] !== 'test') {
     throw new Error('_setOpenCodeServerPoolDeps is test-only');
@@ -495,12 +470,10 @@ export function _resetOpenCodeServerPool(
   pool = new OpenCodeServerPool({ ...defaultDeps, ...overrides });
 }
 
-/**
- * Listens on a fresh TCP socket bound to 127.0.0.1:0, captures the
- * assigned port, closes the socket, and hands the port off. Susceptible
- * to a race if another process binds the same port between close and
- * handoff — `spawnEntry` retries once on `EADDRINUSE` (R13).
- */
+// ---------------------------------------------------------------------------
+// pickFreePort — bind to :0, capture the OS-assigned port, close.
+// ---------------------------------------------------------------------------
+
 async function pickFreePort(): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     const srv = createServer();
@@ -522,6 +495,10 @@ function isEAddrInUse(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   return (err as NodeJS.ErrnoException).code === 'EADDRINUSE';
 }
+
+// ---------------------------------------------------------------------------
+// Audit log
+// ---------------------------------------------------------------------------
 
 export interface AuditOpenCodeLaunchArgs {
   source: string;
@@ -547,20 +524,18 @@ export function auditOpenCodeLaunch({
   );
 }
 
-// Best-effort process-exit cleanup. The pool isn't load-bearing for
-// data integrity (sessions persist on disk via XDG_DATA_HOME), but
-// leaving zombies is bad citizenship on a shared box.
+// ---------------------------------------------------------------------------
+// Process-exit cleanup
+// ---------------------------------------------------------------------------
+
 if (typeof process !== 'undefined' && process.env['VITEST'] !== 'true') {
-  const onShutdown = (signal: string): void => {
+  const onShutdown = (): void => {
     void pool.shutdownAll().finally(() => {
-      // Re-raise the signal so the parent's default handlers can run.
-      if (signal === 'SIGTERM' || signal === 'SIGINT') {
-        process.exit(0);
-      }
+      process.exit(0);
     });
   };
-  process.once('SIGTERM', () => onShutdown('SIGTERM'));
-  process.once('SIGINT', () => onShutdown('SIGINT'));
+  process.once('SIGTERM', onShutdown);
+  process.once('SIGINT', onShutdown);
   process.once('beforeExit', () => {
     void pool.shutdownAll();
   });

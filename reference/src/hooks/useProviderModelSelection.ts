@@ -21,6 +21,7 @@ export const PROVIDER_LABELS: Record<Provider, string> = {
   anthropic: 'Claude',
   openai: 'OpenAI',
   opencode: 'OpenCode',
+  'github-copilot': 'GitHub Copilot',
 };
 
 // Static labels for the two enum-backed providers. OpenCode labels come from

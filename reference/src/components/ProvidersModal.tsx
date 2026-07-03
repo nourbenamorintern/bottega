@@ -9,6 +9,7 @@ import { Button } from './ui/button';
 import ClaudeAuthPanel from './ClaudeAuthPanel';
 import CodexAuthPanel from './CodexAuthPanel';
 import OpenCodeAuthPanel from './OpenCodeAuthPanel';
+import CopilotAuthPanel from './CopilotAuthPanel';
 
 export interface ProvidersModalProps {
   isOpen: boolean;
@@ -63,6 +64,8 @@ function ProvidersModal({ isOpen, onClose, dismissable = true }: ProvidersModalP
           <CodexAuthPanel />
           <div className="border-t border-border" />
           <OpenCodeAuthPanel />
+          <div className="border-t border-border" />
+          <CopilotAuthPanel />
         </div>
       </div>
     </div>
